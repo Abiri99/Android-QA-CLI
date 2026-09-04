@@ -93,4 +93,30 @@ describe('main: commander parse errors honor --json', () => {
     expect(code).toBe(0)
     expect(s.lines.join('\n')).toMatch(/Usage:/)
   })
+
+  it('bare invocation under --json produces the JSON error shape and exits 1, not silence', async () => {
+    const s = sink()
+    const code = await main(['--json'], s.write)
+    expect(code).toBe(1)
+    expect(s.lines.length).toBeGreaterThan(0)
+    const parsed = JSON.parse(s.lines[0]!)
+    expect(parsed.error).toBe('E_BAD_ARGS')
+    expect(typeof parsed.message).toBe('string')
+  })
+
+  it('help for a nonexistent subcommand under --json produces the JSON error shape and exits 1', async () => {
+    const s = sink()
+    const code = await main(['help', 'bogus-sub', '--json'], s.write)
+    expect(code).toBe(1)
+    expect(s.lines.length).toBeGreaterThan(0)
+    const parsed = JSON.parse(s.lines[0]!)
+    expect(parsed.error).toBe('E_BAD_ARGS')
+  })
+
+  it('screen --help still exits 0 (subcommand help stays a success path)', async () => {
+    const s = sink()
+    const code = await main(['screen', '--help'], s.write)
+    expect(code).toBe(0)
+    expect(s.lines.join('\n')).toMatch(/Usage:/)
+  })
 })

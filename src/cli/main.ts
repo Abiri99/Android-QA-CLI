@@ -13,15 +13,14 @@ import { emit, emitError, renderDevices } from './output.js'
 const require = createRequire(import.meta.url)
 const { version } = require('../../package.json') as { version: string }
 
-// commander.js codes for a successful `--help`/`--version` invocation under
-// `exitOverride()`: these throw a `CommanderError` just like a genuine parse
-// failure, but they are not errors and must exit 0 with their normal output
-// intact.
-const COMMANDER_SUCCESS_CODES = new Set([
-  'commander.helpDisplayed',
-  'commander.help',
-  'commander.version',
-])
+// commander.js throws a `CommanderError` under `exitOverride()` for both a
+// genuine successful `--help`/`--version` invocation AND for error-shaped
+// help paths ("no subcommand given", "help for a nonexistent subcommand"),
+// which commander reaches via `this.help({ error: true })`. Both cases can
+// carry the *same* `code` (`commander.help`) — `code` alone cannot tell them
+// apart. Commander already computes the right answer on `exitCode`: `0` for
+// an explicit help/version request, `1` for the error-shaped ones. So branch
+// on `exitCode`, not `code`.
 
 export async function main(
   argv: string[],
@@ -51,10 +50,22 @@ export async function main(
   // single rendering below (via `emitError`) is the only output. `--help`
   // and `--version` also throw under `exitOverride`, but they still write
   // their normal text via `writeOut`, which is left in place.
+  //
+  // The error-shaped help paths ("no subcommand given", "help for a
+  // nonexistent subcommand") write their help text through `writeErr`
+  // (commander's `help({ error: true })`), and `CommanderError.message` for
+  // that case is just the placeholder string `'(outputHelp)'` — commander
+  // doesn't have the rendered text available to put in the message. Capture
+  // what `writeErr` receives instead of discarding it, so the JSON/text
+  // error we emit carries the actual usage text rather than that
+  // placeholder.
+  let capturedErrText = ''
   program.exitOverride()
   program.configureOutput({
     writeOut: (str) => out(str.replace(/\n+$/, '')),
-    writeErr: () => undefined,
+    writeErr: (str) => {
+      capturedErrText += str
+    },
   })
 
   program
@@ -113,10 +124,11 @@ export async function main(
     await program.parseAsync(argv, { from: 'user' })
   } catch (e) {
     if (e instanceof CommanderError) {
-      if (COMMANDER_SUCCESS_CODES.has(e.code)) {
+      if (e.exitCode === 0) {
         exitCode = 0
       } else {
-        exitCode = emitError(new AgentQaError('E_BAD_ARGS', e.message), jsonMode(), out)
+        const message = capturedErrText.trim() || e.message
+        exitCode = emitError(new AgentQaError('E_BAD_ARGS', message), jsonMode(), out)
       }
     } else {
       exitCode = emitError(e, jsonMode(), out)
