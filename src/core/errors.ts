@@ -10,6 +10,10 @@ export type ErrorCode =
   | 'E_DAEMON_VERSION'
   | 'E_UNKNOWN_COMMAND'
   | 'E_INTERNAL'
+  | 'E_STALE_REF'
+  | 'E_NO_MATCH'
+  | 'E_UNSUPPORTED_TEXT'
+  | 'E_TIMEOUT'
 
 export interface AgentQaErrorJson {
   error: ErrorCode
