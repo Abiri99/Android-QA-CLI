@@ -319,21 +319,135 @@ against `adb shell pm list packages`.
 `releaseCandidate`) cannot use `run-as`, so auth snapshot/restore is
 unavailable there and says so explicitly.
 
-## 7. Auth
+## 7. Auth gates
+
+Auth rarely presents as a single "logged out at launch" condition. It appears
+mid-flow as session expiry, a 401 redirect, step-up authentication before a
+sensitive action, a biometric prompt, an OTP, or an OAuth tab. The design
+therefore treats auth as a set of named **gates** — declared per project,
+detected generically, and resolved by whoever can resolve them.
+
+### 7.1 The CLI does not own the human conversation
+
+The agent, not the CLI, has a channel to the human. A CLI that blocks on stdin
+assumes an interactive terminal that a non-interactive agent run does not have,
+and assumes a human is watching it.
+
+So any command that hits a gate fails fast with a structured, actionable error:
+
+```json
+{
+  "error": "E_AUTH_REQUIRED",
+  "gate": "login",
+  "kind": "credentials",
+  "message": "Log in with a test account",
+  "device": "emulator-5554",
+  "screen": "LoginScreen",
+  "resume": "agentqa auth wait --gate login --timeout 5m",
+  "human_action_required": true
+}
+```
+
+The agent relays this to the human in its own words, then calls
+`agentqa auth wait`, which blocks until the gate clears. One mechanism, two
+consumers: an agent relays and waits; a human at a TTY sees the same payload
+rendered as a prompt.
+
+On pause the tool raises a macOS notification (`terminal-notifier`, falling
+back to `osascript`). This is the difference between a thirty-second pause and
+a twenty-minute one, since the human is frequently not watching the terminal.
+
+### 7.2 Gates are declared per project
+
+The tool ships no app-specific knowledge of authentication. Gates are config:
+
+```toml
+[[auth.gate]]
+name    = "login"
+kind    = "credentials"
+when    = { state = "auth.authenticated=false" }          # free, instrumented
+or_when = { ui_any = ["tag=login_btn", "text=Sign in"] }  # fallback, costs a dump
+message = "Log in with a test account"
+until   = { state = "auth.authenticated=true" }
+
+[[auth.gate]]
+name    = "step_up"
+kind    = "biometric"
+when    = { ui_any = ["text=Confirm it's you"] }
+message = "Approve the biometric prompt"
+```
+
+Gates are named because apps commonly have several — login, then an in-app PIN,
+then step-up before payment — each satisfied independently.
+
+The reserved `auth` key (§6.1) is not the detection mechanism; it is one
+possible `when`/`until` source. It remains the preferred one where available,
+because it is free to evaluate and is the only source that can *confirm* rather
+than infer that authentication succeeded (§7.5).
+
+Detection cost follows instrumentation: a `state` condition is evaluated
+daemon-side for nothing, while a `ui_any` condition costs a screen dump under
+`AdbDriver`. Gate checks therefore run after every mutating command when the
+conditions are state-based, and only on explicit check or on command failure
+when they require a dump.
+
+### 7.3 Kinds, and who resolves them
+
+| `kind` | Emulator | Physical device |
+|---|---|---|
+| `credentials` | human types on device | human |
+| `biometric` | automatable — `adb emu finger touch 1` | human touches sensor |
+| `otp_sms` | automatable — `adb emu sms send` | human reads phone |
+| `oauth_web` | human (Custom Tab) | human |
+| `device_credential` | human enters PIN | human |
+| `captcha` | human, always | human |
+
+The two automatable kinds are worth implementing: biometric prompts and SMS
+OTP are common gates, and on an emulator the tool satisfies them with no human
+involvement, converting a large fraction of real pauses into non-events.
+
+`captcha` is human-only by policy. The tool must not attempt to solve or bypass
+bot detection.
+
+### 7.4 Pause once, not every run
+
+On successful gate resolution, if `auth.strategy = "snapshot"`, the tool
+automatically snapshots the app data directory. Subsequent runs restore instead
+of pausing.
+
+The lifecycle becomes: pause once → human authenticates → automatic snapshot →
+silent thereafter, until the token expires or the app schema changes. This is
+what makes auth a one-time cost rather than a per-run tax, and wiring the
+snapshot to the pause means nobody has to remember to take one.
+
+### 7.5 Resolution is confirmed or inferred, never assumed
+
+A cleared gate means the blocking condition is gone, which is weaker than
+"authentication succeeded."
+
+- With a `state`-based `until`, resolution is **confirmed**.
+- With a `ui_any`-based `until`, resolution is **inferred**, and reported as
+  such, because the screen may have changed for unrelated reasons.
+
+`auth status` reports `unknown` where no gate condition is evaluable, rather
+than guessing from pixels.
+
+### 7.6 Resumption
+
+Before pausing, the tool records a checkpoint — the current screen and, if the
+flow arrived by deep link, that link. After resolution, `--resume-to
+checkpoint` returns there, since authentication frequently leaves the app
+somewhere unrelated.
+
+The pause and its duration are recorded as a step in the run trace (§8), so a
+flow waiting on a human does not read as a hung tool.
+
+### 7.7 Snapshot and restore
 
 ```
-auth status              # reads reserved `auth` key
-auth login               # blocks for a human, polls until authenticated
 auth snapshot [name]     # run-as tar of the data dir → ~/.agentqa/auth/
 auth restore <name>      # force-stop, wipe, untar, relaunch, verify
 ```
-
-With no instrumentation, `auth status` reports `unknown` rather than guessing
-from pixels.
-
-Snapshot/restore is the single largest speed win in the tool: it makes logging
-in a one-time human cost rather than a per-`clear` cost, which matters when an
-agent iterates on a flow twenty times.
 
 Three constraints, baked in rather than discovered:
 
@@ -345,11 +459,23 @@ Three constraints, baked in rather than discovered:
    first `snapshot`.
 3. **Coverage is partial.** Credentials held in AccountManager, the Android
    keystore, or external storage are outside the data directory. `restore`
-   therefore verifies `auth.authenticated` afterward and fails loudly rather
-   than leaving a silently logged-out app.
+   therefore verifies the relevant gate's `until` condition afterward and fails
+   loudly rather than leaving a silently logged-out app.
+
+Snapshot requires a debuggable variant (§6.4); on a non-debuggable variant the
+tool reports `E_NOT_DEBUGGABLE` and falls back to pausing on every run.
 
 **Open risk:** constraint 3 may make restore ineffective for a given app.
 Validate against one real app before treating it as a headline feature (§11).
+
+### 7.8 Safety
+
+- **The tool never types credentials.** No passwords in `agentqa.toml`, no
+  credential arguments, no autofill. The human types on the device; the tool
+  observes only that the gate cleared. This keeps secrets out of the run trace
+  and out of the agent's context.
+- **The agent is never asked to supply credentials.** `E_AUTH_REQUIRED` is a
+  request to involve the human, not a prompt for the agent to fill in.
 
 ## 8. Run trace
 
@@ -384,15 +510,20 @@ Lifecycle install, launch, stop, clear, deeplink <uri>
 Observe   screen, screenshot, logs [--since], crashes
 Act       tap <target>, type <text>, swipe, key <name>, wait-for <predicate>
 State     state get <key>, state list, state watch <key>
-Auth      auth status|login|snapshot|restore
+Auth      auth status, auth check, auth wait, auth snapshot|restore|list
 Trace     run start|end, report <run>
 Project   init, doctor, probe add|list|strip
 ```
 
 All commands support `--json`. Errors carry stable machine-readable codes
 (`E_UI_NOT_IDLE`, `E_STALE_REF`, `E_NOT_INSTRUMENTED`, `E_NOT_DEBUGGABLE`,
-`E_STATE_STALE`) so the agent can branch on failure kind rather than parsing
-prose.
+`E_STATE_STALE`, `E_AUTH_REQUIRED`, `E_AUTH_TIMEOUT`) so the agent can branch on
+failure kind rather than parsing prose.
+
+`E_AUTH_REQUIRED` is the one error every command may return, since a gate can
+trip at any point in a flow. Its payload (§7.1) carries the `resume` command, so
+an agent's handling is uniform: relay the message to the human, run `auth wait`,
+retry.
 
 ## 10. Config
 
@@ -410,6 +541,15 @@ deeplink_scheme = "example"
 
 [auth]
 strategy = "snapshot"                # snapshot | manual | none
+notify   = true                      # macOS notification on pause
+
+[[auth.gate]]
+name    = "login"
+kind    = "credentials"
+when    = { state = "auth.authenticated=false" }
+or_when = { ui_any = ["tag=login_btn", "text=Sign in"] }
+message = "Log in with a test account"
+until   = { state = "auth.authenticated=true" }
 
 [trace]
 enabled = true
@@ -440,14 +580,21 @@ intact. If it does not, `auth` reduces to `status` + `login` and snapshot is cut
 | logcat drops make state stale | Medium | Seq-based gap detection; 16MB buffer |
 | `OnDeviceDriver` becomes a maintenance sink | Medium | Ships only after the command surface has settled |
 | Per-project onboarding friction | Medium | One-call wiring; `doctor` diagnoses |
+| Gate matchers drift as the app's UI changes | Medium | Prefer `state` conditions; `doctor` reports gates that never match |
+| Black-box gate resolution is inferred, not confirmed | Low | Reported as inferred (§7.5); never asserted as success |
 
 ## 13. Phasing
 
 1. **Skeleton.** Client, daemon, UDS protocol, `AdbDriver`, `devices`, `screenshot`, `screen`.
 2. **Act & observe.** `tap`, `type`, `swipe`, `key`, `wait-for screen`, `logs`, `crashes`.
 3. **Instrumentation.** `init`, `AgentQa.kt`, variant mapping, projection, `state *`, `wait-for state`.
-4. **Auth.** Validation spike, then `auth *`.
-5. **Trace.** Run capture, `report`.
-6. **`OnDeviceDriver`.** Once the command surface has stabilized.
+4. **Auth gates.** Gate config, detection, `E_AUTH_REQUIRED`, `auth check|wait`,
+   notification, checkpoint/resume. No snapshot dependency.
+5. **Auth persistence.** Validation spike (§11), then `auth snapshot|restore`
+   and automatic snapshot-on-resolution.
+6. **Trace.** Run capture, `report`.
+7. **`OnDeviceDriver`.** Once the command surface has stabilized.
 
-Phases 1–3 are the minimum useful tool.
+Phases 1–4 are the minimum useful tool. Gates come before persistence because
+detection and pausing carry most of the value and, unlike snapshot, do not
+depend on the validation spike succeeding.
