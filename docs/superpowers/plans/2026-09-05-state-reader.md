@@ -2398,3 +2398,45 @@ git commit -m "feat: wire state commands and event-driven wait-for"
 **Known design tension, flagged rather than hidden.** `Capture` is keyed by device, not by (device, package) as spec §5.3 describes, because package filtering needs `logcat --pid` which needs an `applicationId` that only `init` can resolve. Equivalent in practice while only the app under test emits the `AgentQA` tag.
 
 **The riskiest assumption.** Step 6.6: `adb shell log` runs as a fresh PID per invocation, so the process-death reset may fire on every injected line. If it does, the verification method and the design are in tension and the task must report which one is wrong. That is why the step asks for observation rather than a pass/fail.
+
+---
+
+## Post-implementation corrections
+
+This plan's sample code shipped four defects, all caught during execution and
+all of the project's recurring shape: **plausible wrong behaviour rather than
+an error**. Two were caught by implementers reasoning about the code rather
+than transcribing it. The shipped code in git is the reference.
+
+| Task | Defect | Where fixed |
+|---|---|---|
+| 4 | Staleness compared the **app's own `seq`** on both sides, and gap detection used `>`, catching only forward skips. When an app restarts and its counter resets (100 → 1) with no prior `reset()`, no gap is flagged and every new write then falls below a leftover `lastGapSeq` — so fresh values read as permanently stale. Since a stale entry refuses to satisfy a predicate, `wait-for state` would hang forever after such a restart. | `src/state/projection.ts` — an internal monotonic `order` counter drives staleness, and `!==` treats a backward jump as a discontinuity |
+| 6 | `wait-for-event` checked the already-received ring with `.find()`, which returns the **oldest** match on an append-ordered ring. The stated rationale was "an agent that acts and then waits for the event it caused" — but a name that fired earlier in the session resolved instantly against the stale occurrence and was reported as confirmation. | `src/daemon/commands.ts` — `findLast` |
+| 6 | `parseStatePredicate` did not trim around `=`, so `a = true` yielded the key `"a "` and the **string** `" true"` rather than the boolean. The predicate then silently never matched and the agent timed out with no explanation. | `src/state/query.ts` |
+| 6 | `state-get` on a resolved key whose nested path was missing returned a response with **no `value` field at all** — `readPath` returned `undefined` and `JSON.stringify` dropped it — indistinguishable from a legitimately absent value. | `src/daemon/commands.ts` — throws `E_NO_MATCH` naming key and path; a genuinely `null` value still returns normally |
+
+A fifth defect was in a **test**: `rejects an empty predicate` asserted
+`toThrowError(/E_BAD_ARGS/)`, but vitest matches that against the error
+*message*, which is `empty state predicate` and contains no such string. The
+regex could never match. Corrected to `/E_BAD_ARGS|empty/`, the pattern used
+elsewhere in this codebase — though that pattern is itself weak, since only the
+message half can ever match and it therefore does not pin the error code an
+agent branches on.
+
+## Known limits, recorded rather than hidden
+
+- **Cross-line behaviour is unproven on hardware.** Gap detection and chunk
+  reassembly could not be verified end to end, because `adb shell log` spawns a
+  new PID per invocation and the capture's process-death reset then fires on
+  nearly every injected line. No variant of that injection method escapes this.
+  Both remain covered by unit tests against synthetic wire lines; proving them
+  on a device needs a genuinely instrumented app, which is phase 3b.
+- **Capture is keyed by device, not by package**, because package filtering
+  needs `logcat --pid`, which needs an `applicationId` only `init` can resolve.
+  The consequence is sharper than first recorded: it is not merely that one
+  projection serves all apps — **any second process emitting the `AgentQA` tag
+  would trigger constant projection resets and destroy the state stream.**
+  Phase 3b's `init` should add `--pid` scoping.
+- **`wait-for event`'s ring check can still match an event predating the
+  agent's action**, since nothing marks when the wait began. `findLast` narrows
+  it to the most recent occurrence; closing it fully needs a `since` baseline.
