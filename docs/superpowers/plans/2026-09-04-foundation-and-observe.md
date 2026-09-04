@@ -1060,8 +1060,8 @@ function isInteresting(n: UiNode): boolean {
   return isInteractive(n) || n.text.length > 0 || n.desc.length > 0
 }
 
-function hasInterestingDescendant(n: UiNode): boolean {
-  return n.children.some((c) => (hasArea(c.bounds) && isInteresting(c)) || hasInterestingDescendant(c))
+function hasInteractiveDescendant(n: UiNode): boolean {
+  return n.children.some((c) => (hasArea(c.bounds) && isInteractive(c)) || hasInteractiveDescendant(c))
 }
 
 function firstText(n: UiNode): string {
@@ -1091,7 +1091,7 @@ export function compact(root: UiNode): ScreenElement[] {
 
   function walk(n: UiNode): void {
     const usable = hasArea(n.bounds)
-    if (usable && isInteresting(n) && !hasInterestingDescendant(n)) {
+    if (usable && isInteresting(n) && !hasInteractiveDescendant(n)) {
       out.push({
         ref: `#${out.length + 1}`,
         role: roleOf(n),
