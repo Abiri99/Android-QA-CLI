@@ -3,6 +3,14 @@ import { listDevices, selectDevice } from '../adb/devices.js'
 import { AdbDriver } from '../driver/adb-driver.js'
 import type { Driver } from '../driver/types.js'
 import type { CommandRegistry } from './server.js'
+import { RefStore } from './refs.js'
+import { parseTarget, resolveOne, centerOf } from '../ui/target.js'
+import type { Point, Target } from '../ui/target.js'
+import { parsePredicate, pollUntil } from '../ui/predicate.js'
+import { readLogs, readCrashes } from '../adb/logcat.js'
+import { KEY_CODES } from '../driver/types.js'
+import type { KeyName } from '../driver/types.js'
+import { AgentQaError } from '../core/errors.js'
 
 /**
  * Builds the driver for one device serial. This is the seam the spec's
@@ -36,19 +44,125 @@ function serialArg(args: Record<string, unknown>): string | undefined {
   return typeof s === 'string' ? s : undefined
 }
 
+function stringArg(args: Record<string, unknown>, name: string): string {
+  const value = args[name]
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new AgentQaError('E_BAD_ARGS', `missing required argument: ${name}`, { argument: name })
+  }
+  return value
+}
+
+function numberArg(args: Record<string, unknown>, name: string): number | undefined {
+  const value = args[name]
+  return typeof value === 'number' ? value : undefined
+}
+
+function keyNameArg(args: Record<string, unknown>): KeyName {
+  const name = stringArg(args, 'name')
+  if (!(name in KEY_CODES)) {
+    throw new AgentQaError(
+      'E_BAD_ARGS',
+      `unknown key: ${name} (expected one of ${Object.keys(KEY_CODES).join(', ')})`,
+      { name },
+    )
+  }
+  return name as KeyName
+}
+
 export function registerCommands(
   registry: CommandRegistry,
   drivers: DriverRegistry,
   adb: AdbRunner,
+  refs: RefStore,
 ): void {
   registry.register('ping', async () => ({ ok: true }))
 
   registry.register('devices', async () => listDevices(adb))
 
+  // Resolves a target to a coordinate. A #N ref resolves against the CACHED
+  // snapshot — that is what a ref means. A tag/text/desc selector takes a fresh
+  // read, because it names something on the screen as it is now.
+  async function pointFor(serial: string, raw: string): Promise<Point> {
+    const target: Target = parseTarget(raw)
+    if ('point' in target) return target.point
+    if ('ref' in target) return centerOf(refs.resolve(serial, target.ref).bounds)
+
+    const snapshot = await drivers.get(serial).screen()
+    // Record it: the caller invalidates immediately after acting, but a failed
+    // resolution should still leave the agent with usable refs to inspect.
+    refs.record(serial, snapshot.elements)
+    return centerOf(resolveOne(snapshot.elements, target).bounds)
+  }
+
   registry.register('screen', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
     const snapshot = await drivers.get(device.serial).screen({ full: args.full === true })
+    refs.record(device.serial, snapshot.elements)
     return { serial: device.serial, ...snapshot }
+  })
+
+  registry.register('tap', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    const point = await pointFor(device.serial, stringArg(args, 'target'))
+    const durationMs = numberArg(args, 'durationMs')
+    await drivers.get(device.serial).tap(point, durationMs === undefined ? {} : { durationMs })
+    refs.invalidate(device.serial)
+    return { ok: true, serial: device.serial, point }
+  })
+
+  registry.register('type', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    await drivers.get(device.serial).typeText(stringArg(args, 'text'))
+    refs.invalidate(device.serial)
+    return { ok: true, serial: device.serial }
+  })
+
+  registry.register('swipe', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    const from = await pointFor(device.serial, stringArg(args, 'from'))
+    const to = await pointFor(device.serial, stringArg(args, 'to'))
+    await drivers.get(device.serial).swipe(from, to, numberArg(args, 'durationMs') ?? 300)
+    refs.invalidate(device.serial)
+    return { ok: true, serial: device.serial, from, to }
+  })
+
+  registry.register('key', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    await drivers.get(device.serial).key(keyNameArg(args))
+    refs.invalidate(device.serial)
+    return { ok: true, serial: device.serial }
+  })
+
+  registry.register('wait-for', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    const predicate = parsePredicate(stringArg(args, 'predicate'))
+    const elements = await pollUntil(
+      async () => (await drivers.get(device.serial).screen()).elements,
+      predicate,
+      {
+        timeoutMs: numberArg(args, 'timeoutMs') ?? 10_000,
+        intervalMs: numberArg(args, 'intervalMs') ?? 500,
+      },
+    )
+    refs.record(device.serial, elements)
+    return { serial: device.serial, elements }
+  })
+
+  registry.register('logs', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    const grep = typeof args.grep === 'string' ? args.grep : undefined
+    const lines = await readLogs(adb, device.serial, {
+      lines: numberArg(args, 'lines'),
+      ...(grep === undefined ? {} : { grep }),
+    })
+    return { serial: device.serial, lines }
+  })
+
+  registry.register('crashes', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    const opts = numberArg(args, 'lines')
+    const lines = await readCrashes(adb, device.serial, opts === undefined ? {} : { lines: opts })
+    return { serial: device.serial, lines }
   })
 
   registry.register('screenshot', async (args) => {
