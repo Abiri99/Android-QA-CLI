@@ -97,4 +97,53 @@ describe('DaemonServer', () => {
     await expect(second.listen(sock)).resolves.toBeUndefined()
     await second.close()
   })
+
+  it('responds to valid requests that precede a malformed line in the same chunk', async () => {
+    const registry = new CommandRegistry()
+    registry.register('ping', async () => 'pong')
+    const server = new DaemonServer(registry, '0.1.0')
+    const sock = tmpSocket()
+    await server.listen(sock)
+    try {
+      const responses: IpcResponse[] = []
+      const closed = await new Promise<boolean>((resolve, reject) => {
+        const decoder = new FrameDecoder()
+        const c = connect(sock, () => {
+          const payload =
+            encode({ id: '1', version: '0.1.0', cmd: 'ping', args: {} }) +
+            encode({ id: '2', version: '0.1.0', cmd: 'ping', args: {} }) +
+            'not json\n'
+          c.write(payload)
+        })
+        c.on('data', (chunk) => {
+          responses.push(...(decoder.push(chunk) as IpcResponse[]))
+        })
+        c.on('close', () => resolve(true))
+        c.on('error', reject)
+      })
+      expect(closed).toBe(true)
+      expect(responses).toEqual([
+        { id: '1', ok: true, data: 'pong' },
+        { id: '2', ok: true, data: 'pong' },
+      ])
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('answers E_INTERNAL rather than crashing when a handler result cannot be encoded', async () => {
+    const registry = new CommandRegistry()
+    const circular: Record<string, unknown> = {}
+    circular.self = circular
+    registry.register('bad', async () => circular)
+    const server = new DaemonServer(registry, '0.1.0')
+    const sock = tmpSocket()
+    await server.listen(sock)
+    try {
+      const res = await ask(sock, encode({ id: '1', version: '0.1.0', cmd: 'bad', args: {} }))
+      expect(res).toMatchObject({ id: '1', ok: false, error: { error: 'E_INTERNAL' } })
+    } finally {
+      await server.close()
+    }
+  })
 })

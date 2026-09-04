@@ -1,7 +1,7 @@
 import { createServer, type Server, type Socket } from 'node:net'
 import { existsSync, unlinkSync } from 'node:fs'
 import { AgentQaError, isAgentQaError } from '../core/errors.js'
-import { encode, FrameDecoder } from '../ipc/protocol.js'
+import { encode, FrameDecoder, FrameDecodeError } from '../ipc/protocol.js'
 import type { IpcRequest, IpcResponse } from '../ipc/protocol.js'
 
 export type Handler = (args: Record<string, unknown>) => Promise<unknown>
@@ -56,12 +56,18 @@ export class DaemonServer {
   private onConnection(socket: Socket): void {
     const decoder = new FrameDecoder()
     socket.on('data', async (chunk: Buffer) => {
-      let messages
+      let messages: ReturnType<FrameDecoder['push']>
+      let malformed = false
       try {
         messages = decoder.push(chunk)
-      } catch {
-        socket.end()
-        return
+      } catch (e) {
+        if (e instanceof FrameDecodeError) {
+          messages = e.decoded
+          malformed = true
+        } else {
+          socket.end()
+          return
+        }
       }
       for (const msg of messages) {
         const req = msg as IpcRequest
@@ -76,10 +82,34 @@ export class DaemonServer {
                   `daemon is ${this.version}, client is ${req.version}`,
                 ).toJSON(),
               }
-        socket.write(encode(res))
+        this.send(socket, res, req.id)
       }
+      if (malformed) socket.end()
     })
     socket.on('error', () => socket.destroy())
+  }
+
+  // encode()/socket.write() can throw (e.g. JSON.stringify on a circular
+  // handler result), and this runs inside an async 'data' listener whose
+  // rejection Node does not catch — an uncaught throw here would become an
+  // unhandled rejection and kill the daemon process for every project on
+  // the machine. Never let anything escape this method.
+  private send(socket: Socket, res: IpcResponse, id: string): void {
+    try {
+      socket.write(encode(res))
+    } catch {
+      try {
+        socket.write(
+          encode({
+            id,
+            ok: false,
+            error: new AgentQaError('E_INTERNAL', 'failed to encode response').toJSON(),
+          }),
+        )
+      } catch {
+        socket.destroy()
+      }
+    }
   }
 
   close(): Promise<void> {
