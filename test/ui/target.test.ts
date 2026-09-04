@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { parseTarget, matchElements, resolveOne, centerOf } from '../../src/ui/target.js'
 import type { ScreenElement } from '../../src/ui/compact.js'
+import { RefStore } from '../../src/daemon/refs.js'
 
 function el(over: Partial<ScreenElement> = {}): ScreenElement {
   return {
@@ -95,6 +96,23 @@ describe('resolveOne', () => {
     } catch (e) {
       expect((e as { details?: { candidates?: string[] } }).details?.candidates).toEqual(['#1', '#2'])
     }
+  })
+})
+
+describe('ref resolution lives in RefStore, not target.ts', () => {
+  // matchElements/resolveOne intentionally cannot take a { ref } target (see
+  // ElementTarget in src/ui/target.ts) — a ref is only meaningful relative to
+  // the snapshot it came from, and RefStore is what tracks that. This test
+  // documents where ref resolution actually happens.
+  it('RefStore.resolve looks up the element recorded for that ref', () => {
+    const elements = [
+      el({ ref: '#1', text: 'Checkout' }),
+      el({ ref: '#2', text: 'Cancel' }),
+    ]
+    const store = new RefStore()
+    store.record('emulator-5554', elements)
+
+    expect(store.resolve('emulator-5554', '#2')).toBe(elements[1])
   })
 })
 

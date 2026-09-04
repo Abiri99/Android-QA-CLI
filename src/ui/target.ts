@@ -14,6 +14,17 @@ export type Target =
   | { desc: string }
   | { point: Point }
 
+/**
+ * A target that can be matched against a plain list of elements.
+ *
+ * `{ ref }` is deliberately excluded: a ref is only meaningful relative to the
+ * snapshot it came from, and resolving one requires the staleness tracking that
+ * lives in RefStore. Matching a ref against an arbitrary element list would
+ * silently reintroduce the stale-ref mis-tap RefStore exists to prevent, so the
+ * type makes that a compile error rather than a runtime surprise.
+ */
+export type ElementTarget = Exclude<Target, { ref: string }>
+
 const POINT_RE = /^(-?\d+)\s*,\s*(-?\d+)$/
 
 function unquote(value: string): string {
@@ -55,7 +66,7 @@ export function parseTarget(raw: string): Target {
   )
 }
 
-export function matchElements(elements: ScreenElement[], target: Target): ScreenElement[] {
+export function matchElements(elements: ScreenElement[], target: ElementTarget): ScreenElement[] {
   if ('testTag' in target) {
     return elements.filter((e) => e.testTag === target.testTag)
   }
@@ -67,10 +78,13 @@ export function matchElements(elements: ScreenElement[], target: Target): Screen
     if (exact.length > 0) return exact
     return elements.filter((e) => e.text.includes(target.text))
   }
+  // Only { point } remains once testTag/desc/text are ruled out. A point is a
+  // literal coordinate, not something to search elements for — there is
+  // nothing to match, so the result is always empty.
   return []
 }
 
-export function resolveOne(elements: ScreenElement[], target: Target): ScreenElement {
+export function resolveOne(elements: ScreenElement[], target: ElementTarget): ScreenElement {
   const matches = matchElements(elements, target)
   if (matches.length === 0) {
     throw new AgentQaError('E_NO_MATCH', `no element matched ${describe(target)}`, {
