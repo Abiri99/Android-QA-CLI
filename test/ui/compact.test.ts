@@ -5,6 +5,10 @@ import { compact, renderScreen } from '../../src/ui/compact.js'
 import type { UiNode, Bounds } from '../../src/ui/parse.js'
 
 const xml = readFileSync(new URL('../fixtures/hierarchy-simple.xml', import.meta.url), 'utf8')
+const largeXml = readFileSync(
+  new URL('../fixtures/hierarchy-compose-large.xml', import.meta.url),
+  'utf8',
+)
 
 function node(over: Partial<UiNode> = {}): UiNode {
   const bounds: Bounds = { x1: 0, y1: 0, x2: 100, y2: 100 }
@@ -68,10 +72,13 @@ describe('compact', () => {
 })
 
 describe('renderScreen', () => {
-  it('emits one line per element with tag and bounds', () => {
+  // Spec 4.3: bounds are emitted only for tappable nodes. `#1` is a plain
+  // text node — coordinates for it are unusable and pure token cost — so it
+  // renders without them, while the three tappable elements keep theirs.
+  it('emits one line per element, with bounds only on tappable ones', () => {
     const out = renderScreen(compact(parseHierarchy(xml)))
     expect(out.split('\n')).toEqual([
-      '#1 Text "Total: $42.00" [40,600-1040,680]',
+      '#1 Text "Total: $42.00"',
       '#2 Button "Checkout" tag=checkout_btn [540,1810-1000,1920]',
       '#3 EditText "" id=email_field [40,900-1040,1000]',
       '#4 Button "Cancel" tag=cancel_btn disabled [40,2000-1040,2100]',
@@ -80,5 +87,35 @@ describe('renderScreen', () => {
 
   it('says so explicitly when the screen has nothing to report', () => {
     expect(renderScreen([])).toBe('(no interactive or text elements found)')
+  })
+
+  // The 4-element fixture cannot show that the pipeline actually collapses a
+  // real dump; a Compose screen is mostly nested wrapper Views. This pins the
+  // property the token budget depends on: hundreds of nodes in, a few dozen
+  // lines out.
+  it('collapses a realistic several-hundred-node Compose dump to a few dozen lines', () => {
+    const root = parseHierarchy(largeXml)
+    let nodeCount = 0
+    const count = (n: UiNode): void => {
+      nodeCount += 1
+      for (const c of n.children) count(c)
+    }
+    count(root)
+    expect(nodeCount).toBeGreaterThan(300)
+
+    const lines = renderScreen(compact(root)).split('\n')
+    expect(lines.length).toBeLessThanOrEqual(45)
+    // Every one of the 30 list rows survives as exactly one merged line.
+    expect(lines.filter((l) => l.includes('Wireless charger'))).toHaveLength(30)
+    expect(lines.filter((l) => l.includes('Scrollable') && l.includes('tag=order_list')))
+      .toHaveLength(1)
+  })
+
+  it('spends bounds only on the tappable share of a realistic dump', () => {
+    const els = compact(parseHierarchy(largeXml))
+    const lines = renderScreen(els).split('\n')
+    const withBounds = lines.filter((l) => /\[\d+,\d+-\d+,\d+\]$/.test(l)).length
+    expect(withBounds).toBe(els.filter((e) => e.tappable).length)
+    expect(withBounds).toBeLessThan(lines.length)
   })
 })

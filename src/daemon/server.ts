@@ -2,9 +2,21 @@ import { createServer, type Server, type Socket } from 'node:net'
 import { existsSync, unlinkSync } from 'node:fs'
 import { AgentQaError, isAgentQaError } from '../core/errors.js'
 import { encode, FrameDecoder, FrameDecodeError } from '../ipc/protocol.js'
+import { isSocketListening } from '../ipc/socket.js'
 import type { IpcRequest, IpcResponse } from '../ipc/protocol.js'
 
 export type Handler = (args: Record<string, unknown>) => Promise<unknown>
+
+/**
+ * Commands the daemon answers even when the client was built against a
+ * different version. `shutdown` has to be one: the client's recovery from a
+ * version mismatch is "stop the stale daemon, start a fresh one", and if the
+ * stop itself were rejected for being the wrong version the recovery could
+ * never bootstrap — which is exactly the deadlock a long-lived daemon hits
+ * after an `npm update`. The request/response shape of `shutdown` is
+ * therefore frozen: it takes no arguments and its result is never inspected.
+ */
+const VERSION_INDEPENDENT_COMMANDS: ReadonlySet<string> = new Set(['shutdown'])
 
 export class CommandRegistry {
   private handlers = new Map<string, Handler>()
@@ -41,8 +53,23 @@ export class DaemonServer {
     private readonly version: string,
   ) {}
 
-  listen(socketPath: string): Promise<void> {
-    if (existsSync(socketPath)) unlinkSync(socketPath)
+  // Only a socket file that nothing is listening on may be unlinked. Two
+  // cold-start clients can both find no daemon and both spawn one; without
+  // this probe the second would unlink the first's socket and take the path
+  // over, leaving the first alive forever behind an unlinked inode — still
+  // holding whatever device children it owns. Spec 4.2 is one daemon per
+  // machine; this is what enforces it.
+  async listen(socketPath: string): Promise<void> {
+    if (existsSync(socketPath)) {
+      if (await isSocketListening(socketPath)) {
+        throw new AgentQaError(
+          'E_INTERNAL',
+          `another agentqa daemon is already listening on ${socketPath}`,
+          { socket: socketPath },
+        )
+      }
+      unlinkSync(socketPath)
+    }
     return new Promise((resolve, reject) => {
       const server = createServer((socket) => this.onConnection(socket))
       server.on('error', reject)
@@ -72,7 +99,7 @@ export class DaemonServer {
       for (const msg of messages) {
         const req = msg as IpcRequest
         const res: IpcResponse =
-          req.version === this.version
+          req.version === this.version || VERSION_INDEPENDENT_COMMANDS.has(req.cmd)
             ? await this.registry.dispatch(req)
             : {
                 id: req.id,

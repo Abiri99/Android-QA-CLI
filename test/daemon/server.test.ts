@@ -146,4 +146,36 @@ describe('DaemonServer', () => {
       await server.close()
     }
   })
+  it('answers shutdown across a version mismatch, since that is the recovery path', async () => {
+    const registry = new CommandRegistry()
+    registry.register('shutdown', async () => ({ stopping: true }))
+    const server = new DaemonServer(registry, '0.2.0')
+    const sock = tmpSocket()
+    await server.listen(sock)
+    try {
+      const res = await ask(sock, encode({ id: '1', version: '0.1.0', cmd: 'shutdown', args: {} }))
+      expect(res).toEqual({ id: '1', ok: true, data: { stopping: true } })
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('refuses to unlink a socket a live daemon is still listening on', async () => {
+    const sock = tmpSocket()
+    const first = new DaemonServer(new CommandRegistry(), '0.1.0')
+    await first.listen(sock)
+    const second = new DaemonServer(new CommandRegistry(), '0.1.0')
+    try {
+      await expect(second.listen(sock)).rejects.toMatchObject({
+        code: 'E_INTERNAL',
+        message: expect.stringContaining('already listening'),
+      })
+      // The loser must not have disturbed the winner.
+      const res = await ask(sock, encode({ id: '1', version: '0.1.0', cmd: 'nope', args: {} }))
+      expect(res).toMatchObject({ ok: false, error: { error: 'E_UNKNOWN_COMMAND' } })
+    } finally {
+      await second.close()
+      await first.close()
+    }
+  })
 })

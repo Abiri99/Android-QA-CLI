@@ -6,7 +6,7 @@ import { daemonSocketPath } from '../core/paths.js'
 import { renderScreen } from '../ui/compact.js'
 import type { ScreenElement } from '../ui/compact.js'
 import type { Device } from '../adb/devices.js'
-import { AgentQaError } from '../core/errors.js'
+import { AgentQaError, isAgentQaError } from '../core/errors.js'
 import { buildCli } from './index.js'
 import { emit, emitError, renderDevices } from './output.js'
 
@@ -112,11 +112,26 @@ export async function main(
     .option('--json', 'emit machine-readable JSON')
     .action(async (action: string, opts: { json?: boolean }) => {
       if (action === 'stop') {
-        await client.request('shutdown').catch(() => undefined)
+        try {
+          // No autostart: starting a daemon in order to stop it is absurd,
+          // and "nothing was listening" is the answer this branch needs.
+          await client.request('shutdown', {}, { autostart: false })
+        } catch (e) {
+          // Only "nothing was listening" means already-stopped. Every other
+          // failure (a daemon that refused the request, a malformed reply, a
+          // timeout) left a daemon running, and reporting "daemon stopped"
+          // for those makes the one recovery command a liar.
+          if (!isAgentQaError(e) || e.code !== 'E_DAEMON_UNAVAILABLE') throw e
+        }
         emit({ stopped: true }, () => 'daemon stopped', jsonMode(opts), out)
-      } else {
-        await client.request('devices')
+      } else if (action === 'start') {
+        // `ping` is the adb-free liveness probe. Probing with `devices`
+        // reported E_ADB_NOT_FOUND / E_NO_DEVICE from a daemon that had in
+        // fact started perfectly well.
+        await client.request('ping')
         emit({ running: true }, () => 'daemon running', jsonMode(opts), out)
+      } else {
+        throw new AgentQaError('E_BAD_ARGS', `unknown daemon action: ${action} (expected start or stop)`)
       }
     })
 

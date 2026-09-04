@@ -90,7 +90,12 @@ export function renderScreen(elements: ScreenElement[]): string {
       if (e.testTag) parts.push(`tag=${e.testTag}`)
       else if (e.viewId) parts.push(`id=${e.viewId}`)
       if (!e.enabled) parts.push('disabled')
-      parts.push(`[${e.bounds.x1},${e.bounds.y1}-${e.bounds.x2},${e.bounds.y2}]`)
+      // Spec 4.3: "bounds emitted only for tappable nodes". Coordinates are
+      // only actionable on something you can tap, and on a real screen the
+      // text-only nodes are the majority — emitting their bounds spends the
+      // agent's context on numbers it can never use. The token budget is a
+      // correctness requirement here, not formatting.
+      if (e.tappable) parts.push(`[${e.bounds.x1},${e.bounds.y1}-${e.bounds.x2},${e.bounds.y2}]`)
       return parts.join(' ')
     })
     .join('\n')

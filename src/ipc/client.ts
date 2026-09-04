@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { AgentQaError, isAgentQaError } from '../core/errors.js'
 import { encode, FrameDecoder, FrameDecodeError } from './protocol.js'
-import type { IpcResponse } from './protocol.js'
+import { isSocketListening } from './socket.js'
+import type { IpcMessage, IpcResponse } from './protocol.js'
 
 export interface RequestOpts {
   autostart?: boolean
@@ -12,13 +13,28 @@ export interface RequestOpts {
 
 const STARTUP_TIMEOUT_MS = 5_000
 const POLL_INTERVAL_MS = 100
+const SHUTDOWN_TIMEOUT_MS = 3_000
+// Comfortably above `ExecAdbRunner`'s own 30s bound, so a request that is
+// legitimately waiting on adb is never cut short — this only catches a daemon
+// that accepted the connection and then went silent.
+const REQUEST_TIMEOUT_MS = 60_000
 
 export class DaemonClient {
   constructor(
     private readonly socketPath: string,
     private readonly version: string,
+    private readonly requestTimeoutMs: number = REQUEST_TIMEOUT_MS,
   ) {}
 
+  // Two failures are recoverable by restarting the daemon, and both must be,
+  // because the daemon is long-lived by design:
+  //
+  // - `E_DAEMON_UNAVAILABLE`: nothing is listening, so start one.
+  // - `E_DAEMON_VERSION`: a daemon from a previous install is still running.
+  //   Left unhandled this is unrecoverable — every command fails after any
+  //   upgrade — so stop the stale daemon first, then start ours. Spec 4.1:
+  //   "on mismatch the daemon restarts itself rather than speaking a stale
+  //   protocol".
   async request(
     cmd: string,
     args: Record<string, unknown> = {},
@@ -27,12 +43,44 @@ export class DaemonClient {
     try {
       return await this.send(cmd, args)
     } catch (e) {
-      if (opts.autostart === false || !(e instanceof AgentQaError) || e.code !== 'E_DAEMON_UNAVAILABLE') {
-        throw e
-      }
+      if (opts.autostart === false || !(e instanceof AgentQaError)) throw e
+      if (e.code === 'E_DAEMON_VERSION') await this.stopStaleDaemon(e)
+      else if (e.code !== 'E_DAEMON_UNAVAILABLE') throw e
       await this.spawnDaemon()
       return this.send(cmd, args)
     }
+  }
+
+  // `shutdown` is answered regardless of version (see the daemon's
+  // VERSION_INDEPENDENT_COMMANDS), which is what makes this recovery able to
+  // bootstrap itself. A daemon predating that rule would reject the shutdown
+  // too; there is nothing safe left to do in that case, so we say so with the
+  // original mismatch message rather than unlinking a live daemon's socket.
+  private async stopStaleDaemon(mismatch: AgentQaError): Promise<void> {
+    try {
+      await this.send('shutdown', {})
+    } catch (e) {
+      if (!isAgentQaError(e) || e.code === 'E_DAEMON_VERSION') {
+        throw new AgentQaError(
+          'E_DAEMON_VERSION',
+          `${mismatch.message}; the running daemon refused to shut down — stop it manually`,
+          { socket: this.socketPath },
+        )
+      }
+      // E_DAEMON_UNAVAILABLE here means it is already gone: nothing to wait for.
+      if (e.code !== 'E_DAEMON_UNAVAILABLE') throw e
+    }
+
+    const deadline = Date.now() + SHUTDOWN_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      if (!(await isSocketListening(this.socketPath))) return
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
+    }
+    throw new AgentQaError(
+      'E_DAEMON_VERSION',
+      `${mismatch.message}; the running daemon did not exit within ${SHUTDOWN_TIMEOUT_MS}ms`,
+      { socket: this.socketPath },
+    )
   }
 
   // Resolves or rejects exactly once. Beyond the "matching response arrived"
@@ -50,24 +98,52 @@ export class DaemonClient {
       const settle = (fn: () => void): void => {
         if (settled) return
         settled = true
+        clearTimeout(timer)
         fn()
       }
+
+      // Every other boundary in the tool is bounded (adb at 30s, daemon
+      // startup at 5s). Without this one, a daemon that accepts the
+      // connection and never answers hangs the CLI forever — the worst
+      // possible outcome for a tool an agent invokes non-interactively.
+      const timer = setTimeout(() => {
+        socket.destroy()
+        settle(() =>
+          reject(
+            new AgentQaError(
+              'E_INTERNAL',
+              `daemon did not respond within ${this.requestTimeoutMs}ms`,
+              { socket: this.socketPath, cmd },
+            ),
+          ),
+        )
+      }, this.requestTimeoutMs)
+      timer.unref?.()
 
       socket.on('connect', () => {
         socket.write(encode({ id, version: this.version, cmd, args }))
       })
 
       socket.on('data', (chunk: Buffer) => {
-        let messages: ReturnType<FrameDecoder['push']>
+        let messages: IpcMessage[]
+        let malformed: string | undefined
         try {
           messages = decoder.push(chunk)
         } catch (e) {
-          const cause = e instanceof FrameDecodeError ? e.message : String(e)
-          socket.destroy()
-          settle(() =>
-            reject(new AgentQaError('E_INTERNAL', `malformed response from daemon: ${cause}`)),
-          )
-          return
+          // Mirror the daemon: a malformed line must not discard good
+          // messages that decoded ahead of it in the same chunk. Our response
+          // may be among them, and answering it is strictly better than
+          // failing on a frame that was never ours.
+          if (e instanceof FrameDecodeError) {
+            messages = e.decoded
+            malformed = e.message
+          } else {
+            socket.destroy()
+            settle(() =>
+              reject(new AgentQaError('E_INTERNAL', `malformed response from daemon: ${String(e)}`)),
+            )
+            return
+          }
         }
         for (const msg of messages) {
           const res = msg as IpcResponse
@@ -77,6 +153,13 @@ export class DaemonClient {
             if (res.ok) resolve(res.data)
             else reject(new AgentQaError(res.error.error, res.error.message, res.error.details))
           })
+          return
+        }
+        if (malformed !== undefined) {
+          socket.destroy()
+          settle(() =>
+            reject(new AgentQaError('E_INTERNAL', `malformed response from daemon: ${malformed}`)),
+          )
         }
       })
 

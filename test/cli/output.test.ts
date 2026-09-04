@@ -1,7 +1,15 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { renderDevices, emit, emitError } from '../../src/cli/output.js'
 import { AgentQaError } from '../../src/core/errors.js'
 import { main } from '../../src/cli/main.js'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { CommandRegistry, DaemonServer } from '../../src/daemon/server.js'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
+const { version } = require('../../package.json') as { version: string }
 
 function sink() {
   const lines: string[] = []
@@ -118,5 +126,98 @@ describe('main: commander parse errors honor --json', () => {
     const code = await main(['screen', '--help'], s.write)
     expect(code).toBe(0)
     expect(s.lines.join('\n')).toMatch(/Usage:/)
+  })
+})
+
+describe('main: daemon subcommand', () => {
+  const homes: string[] = []
+  let saved: string | undefined
+
+  beforeEach(() => {
+    saved = process.env.AGENTQA_HOME
+    const home = mkdtempSync(join(tmpdir(), 'agentqa-cli-'))
+    homes.push(home)
+    process.env.AGENTQA_HOME = home
+  })
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env.AGENTQA_HOME
+    else process.env.AGENTQA_HOME = saved
+    for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true })
+  })
+
+  function socketPath(): string {
+    return join(process.env.AGENTQA_HOME!, 'daemon.sock')
+  }
+
+  // `daemon <action>` used to accept any string and silently mean "start", so
+  // `agentqa daemon restart` cheerfully printed "daemon running".
+  it('rejects an unknown action with E_BAD_ARGS instead of quietly starting', async () => {
+    const s = sink()
+    const code = await main(['daemon', 'restart', '--json'], s.write)
+    expect(code).toBe(1)
+    expect(JSON.parse(s.lines[0]!)).toMatchObject({ error: 'E_BAD_ARGS' })
+  })
+
+  // `start` used to probe with `devices`, so a machine with no adb or no
+  // device reported E_ADB_NOT_FOUND from a daemon that had started fine.
+  it('probes liveness with the adb-free ping, not devices', async () => {
+    const registry = new CommandRegistry()
+    registry.register('ping', async () => ({ ok: true }))
+    registry.register('devices', async () => {
+      throw new AgentQaError('E_ADB_NOT_FOUND', 'adb not found')
+    })
+    const server = new DaemonServer(registry, version)
+    await server.listen(socketPath())
+    try {
+      const s = sink()
+      const code = await main(['daemon', 'start', '--json'], s.write)
+      expect(code).toBe(0)
+      expect(JSON.parse(s.lines[0]!)).toEqual({ running: true })
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('reports "stopped" only when nothing was listening', async () => {
+    const s = sink()
+    const code = await main(['daemon', 'stop', '--json'], s.write)
+    expect(code).toBe(0)
+    expect(JSON.parse(s.lines[0]!)).toEqual({ stopped: true })
+  })
+
+  // The old `.catch(() => undefined)` made every failure mode print "daemon
+  // stopped" — the one recovery command reporting success while doing nothing.
+  it('surfaces a daemon that refused the shutdown instead of claiming success', async () => {
+    const server = new DaemonServer(new CommandRegistry(), version)
+    await server.listen(socketPath())
+    try {
+      const s = sink()
+      const code = await main(['daemon', 'stop', '--json'], s.write)
+      expect(code).toBe(1)
+      expect(JSON.parse(s.lines[0]!)).toMatchObject({ error: 'E_UNKNOWN_COMMAND' })
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('stops a live daemon and says so', async () => {
+    const registry = new CommandRegistry()
+    let stopped = false
+    registry.register('shutdown', async () => {
+      stopped = true
+      return { stopping: true }
+    })
+    const server = new DaemonServer(registry, version)
+    await server.listen(socketPath())
+    try {
+      const s = sink()
+      const code = await main(['daemon', 'stop', '--json'], s.write)
+      expect(code).toBe(0)
+      expect(JSON.parse(s.lines[0]!)).toEqual({ stopped: true })
+      expect(stopped).toBe(true)
+    } finally {
+      await server.close()
+    }
   })
 })
