@@ -2397,3 +2397,36 @@ git commit -m "feat: wire CLI commands for devices, screen, and screenshot"
 **Deliberately deferred.** `E_STALE_REF` and ref invalidation land with the act commands in Plan 2, since nothing can invalidate a snapshot until something can mutate the screen. `screen.current` in the snapshot header depends on the state projection (spec §5) and lands in Plan 3. `doctor` is deferred to Plan 2, where it has more than one thing to check.
 
 **Not yet covered by any plan.** Spec phases 2–7. Each gets its own plan.
+
+---
+
+## Post-implementation corrections
+
+This plan's sample code shipped six defects, all caught during execution by
+testing or review rather than by transcription. Two made the plan
+self-contradictory — its own tests failed against its own code — and those
+code blocks have been repaired above. The rest are recorded here; **the shipped
+code in git is the accurate reference for Tasks 9-11**, not the code blocks in
+those tasks.
+
+| Task | Defect | Where fixed |
+|---|---|---|
+| 6 | `hasInterestingDescendant` tested `isInteresting`, making the merge rule unreachable — a clickable wrapper over a text node never merged. The plan's own merge test failed against the plan's own code. | Repaired above (`hasInteractiveDescendant`) |
+| 8 | `chunk.toString('utf8')` per socket read corrupted any multi-byte character split across a chunk boundary into U+FFFD, silently and without throwing. | Repaired above (`StringDecoder`) |
+| 8 | A malformed line unwound the local `out` array, silently discarding good messages decoded earlier from the same chunk. | Repaired above (`FrameDecodeError.decoded`) |
+| 9 | `onConnection`'s bare `catch` discarded `FrameDecodeError.decoded`, so a client sending valid requests followed by a malformed line got no response to any and hung. | `src/daemon/server.ts` |
+| 9 | `encode`/`socket.write` sat outside any try/catch inside an async `'data'` listener; a handler returning a non-serializable value became an unhandled rejection, killing the daemon for every project on the machine. | `src/daemon/server.ts` |
+| 10 | `DaemonClient.send` had no `close` handler, so a socket closing without a matching response id left the promise unsettled and the CLI hung forever. Made live by the Task 9 fix, which ends the socket on a malformed frame. | `src/ipc/client.ts` |
+| 10 | `spawnDaemon`'s bare `catch {}` swallowed failures unrelated to readiness and never surfaced the spawned child's own startup crash. | `src/ipc/client.ts` |
+| 11 | Commander's own parse errors called `process.exit(1)` internally, bypassing `emitError`, so `--json` was not honoured for the most likely agent mistake. Fixed with `exitOverride`, then fixed again: `commander.help` is overloaded across success and error paths, distinguished only by `exitCode`. | `src/cli/main.ts` |
+
+Two things could not be settled from fixtures and were verified against a real
+emulator during Task 11:
+
+- `AdbDriver`'s `TRAILER` regex was **confirmed broken** against live output —
+  real captured stdout ends with a newline after adb's confirmation line, which
+  `.*$` does not match. Fixed to `/\s*UI hierchary dumped to:[^\n]*\s*$/i`.
+- `E_UI_NOT_IDLE`'s branch is **reachable** — `adb exec-out uiautomator dump`
+  exits 0 while printing its error to stdout — but the exact literal
+  `could not get idle state.` was not reproduced. The string match itself
+  remains unproven.
