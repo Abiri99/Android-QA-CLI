@@ -316,7 +316,6 @@ describe('wait-for-event', () => {
   })
 })
 
-
 describe('waits against a dead capture stream', () => {
   // A wait cannot tell "the condition is false" from "we stopped receiving
   // lines" unless it checks. Reporting a blind wait as a timeout is the

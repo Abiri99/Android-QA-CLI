@@ -115,6 +115,13 @@ function keyNameArg(args: Record<string, unknown>): KeyName {
  * Returns an error when the device's capture stream has died, or null while it
  * is healthy.
  *
+ * Known limit: a stream that dies *during* a pending wait is not detected until
+ * that wait's timeout fires, because `markAllStale()` does not notify the
+ * projection's subscribers and nothing else wakes the promise. The verdict is
+ * then correct, but it arrives late — with a long `--timeout` the agent sits
+ * blind until it elapses. Fixing that needs a death notification the waits can
+ * subscribe to.
+ *
  * A wait cannot distinguish "the condition is false" from "we stopped receiving
  * lines" unless it asks. Reporting a blind wait as `E_TIMEOUT` is the failure
  * spec 5.2 exists to prevent, one level up from a dropped log line: the agent
@@ -129,7 +136,7 @@ function deadCaptureError(capture: Capture, serial: string): AgentQaError | null
   if (stats.running) return null
   return new AgentQaError(
     'E_NOT_ATTACHED',
-    `the capture stream for ${serial} has stopped (adb exited with ${stats.lastExitCode ?? 'no code'}), so state stopped updating and this wait could not observe anything; run \`agentqa state attach\` to restart it`,
+    `the capture stream for ${serial} has stopped (adb exited with ${stats.lastExitCode ?? 'no code'}), so nothing further could be observed and this wait was blind; run \`agentqa state attach\` to restart it`,
     { serial, lastExitCode: stats.lastExitCode, running: false },
   )
 }
