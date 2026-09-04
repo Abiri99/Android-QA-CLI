@@ -166,6 +166,29 @@ describe('wait-for-state', () => {
     expect(await pending).toMatchObject({ ok: true })
   })
 
+  it('reports E_STATE_STALE when the value matches but is stale', async () => {
+    const { call, emit, wire } = build()
+    await call('state-attach')
+    emit(wire(1, 'state', 'auth', '{"authenticated":true}'))
+    // A dropped line: seq jumps, so everything written before it is suspect.
+    emit(wire(5, 'state', 'other', '1'))
+    const res = (await call('wait-for-state', {
+      predicate: 'auth.authenticated=true',
+      timeoutMs: 60,
+    })) as { error: { error: string; details: Record<string, unknown> } }
+    expect(res).toMatchObject({ ok: false, error: { error: 'E_STATE_STALE' } })
+    expect(res.error.details).toMatchObject({ key: 'auth', stale: true })
+  })
+
+  it('still reports E_TIMEOUT when the value is stale but does not match', async () => {
+    const { call, emit, wire } = build()
+    await call('state-attach')
+    emit(wire(1, 'state', 'auth', '{"authenticated":false}'))
+    emit(wire(5, 'state', 'other', '1'))
+    expect(await call('wait-for-state', { predicate: 'auth.authenticated=true', timeoutMs: 60 }))
+      .toMatchObject({ ok: false, error: { error: 'E_TIMEOUT' } })
+  })
+
   it('times out with E_TIMEOUT when it never holds', async () => {
     const { call } = build()
     await call('state-attach')
@@ -182,6 +205,46 @@ describe('wait-for-state', () => {
   })
 })
 
+describe('timeout validation', () => {
+  for (const [label, timeoutMs] of [
+    ['a unit suffix the CLI could not parse', '10s'],
+    ['zero', 0],
+    ['a negative', -5],
+  ] as const) {
+    it(`rejects ${label} on a state wait`, async () => {
+      const { call } = build()
+      await call('state-attach')
+      const res = (await call('wait-for-state', {
+        predicate: 'a=1',
+        timeoutMs,
+      })) as { error: { error: string; message: string } }
+      expect(res).toMatchObject({ ok: false, error: { error: 'E_BAD_ARGS' } })
+      expect(res.error.message).toContain(JSON.stringify(timeoutMs))
+    })
+
+    it(`rejects ${label} on an event wait`, async () => {
+      const { call } = build()
+      await call('state-attach')
+      expect(await call('wait-for-event', { name: 'x', timeoutMs }))
+        .toMatchObject({ ok: false, error: { error: 'E_BAD_ARGS' } })
+    })
+
+    it(`rejects ${label} on a screen wait`, async () => {
+      const { call } = build()
+      expect(await call('wait-for', { predicate: 'text=x', timeoutMs }))
+        .toMatchObject({ ok: false, error: { error: 'E_BAD_ARGS' } })
+    })
+  }
+
+  it('accepts a numeric string, so the CLI can forward what was typed', async () => {
+    const { call, emit, wire } = build()
+    await call('state-attach')
+    emit(wire(1, 'state', 'a', '1'))
+    expect(await call('wait-for-state', { predicate: 'a=1', timeoutMs: '200' }))
+      .toMatchObject({ ok: true })
+  })
+})
+
 describe('wait-for-event', () => {
   it('resolves when the named event arrives', async () => {
     const { call, emit, wire } = build()
@@ -191,6 +254,33 @@ describe('wait-for-event', () => {
     const res = (await pending) as { data: { data: unknown } }
     expect(res).toMatchObject({ ok: true })
     expect(res.data.data).toEqual({ orderId: 7 })
+  })
+
+  it('marks a live arrival as not from the ring', async () => {
+    const { call, emit, wire } = build()
+    await call('state-attach')
+    const pending = call('wait-for-event', { name: 'live', timeoutMs: 1000 })
+    // Let the handler get past device selection and subscribe, so this really
+    // is a live arrival rather than one already sitting in the ring.
+    await new Promise((r) => setTimeout(r, 20))
+    emit(wire(1, 'event', 'live', 'null'))
+    const res = (await pending) as { data: { fromRing: boolean; ageMs: number } }
+    expect(res.data.fromRing).toBe(false)
+  })
+
+  it('discloses that a match came from the ring, and how old it is', async () => {
+    const { call, emit, wire } = build()
+    await call('state-attach')
+    emit(wire(1, 'event', 'checkout.success', 'null'))
+    await new Promise((r) => setTimeout(r, 20))
+    // The ring cannot tell whether this predates the agent's action, so the
+    // answer has to say where it came from rather than pass it off as fresh.
+    const res = (await call('wait-for-event', {
+      name: 'checkout.success',
+      timeoutMs: 200,
+    })) as { data: { fromRing: boolean; ageMs: number } }
+    expect(res.data.fromRing).toBe(true)
+    expect(res.data.ageMs).toBeGreaterThan(0)
   })
 
   it('ignores a different event and times out', async () => {

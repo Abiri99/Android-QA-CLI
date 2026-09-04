@@ -63,6 +63,33 @@ function numberArg(args: Record<string, unknown>, name: string): number | undefi
   return value
 }
 
+/**
+ * A timeout that is not a finite positive number of milliseconds is not a
+ * timeout, and every way of getting it wrong here produces a confident lie.
+ * `--timeout 10s` — the spec's own 5.4 example — reaches `Number` as `NaN`;
+ * `setTimeout(NaN)` fires on the next tick, so an event-driven wait reports
+ * `E_TIMEOUT` within milliseconds and the agent reads that as "the condition
+ * is false". `0` and negatives do the same. Validate once, here, so every
+ * consumer of every wait behaves identically — the CLI is not the only caller.
+ *
+ * Strings are accepted so the CLI can forward what the user actually typed and
+ * have it named back to them, instead of an unhelpful `null` (JSON.stringify
+ * turns `NaN` into `null`).
+ */
+function timeoutArg(args: Record<string, unknown>, fallback: number): number {
+  const raw = args.timeoutMs
+  if (raw === undefined || raw === null) return fallback
+  const value = typeof raw === 'string' ? Number(raw.trim()) : raw
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new AgentQaError(
+      'E_BAD_ARGS',
+      `--timeout must be a positive number of milliseconds, got: ${JSON.stringify(raw)}`,
+      { argument: 'timeoutMs', value: raw },
+    )
+  }
+  return value
+}
+
 function stringOptArg(args: Record<string, unknown>, name: string): string | undefined {
   const value = args[name]
   if (value === undefined) return undefined
@@ -188,12 +215,13 @@ export function registerCommands(
     // matter what is attached, and an agent that typed `!540,1200` is better
     // served by being told that than by `E_NO_DEVICE`.
     const predicate = parsePredicate(stringArg(args, 'predicate'))
+    const timeoutMs = timeoutArg(args, 10_000)
     const device = await selectDevice(adb, serialArg(args))
     const elements = await pollUntil(
       async () => (await drivers.get(device.serial).screen()).elements,
       predicate,
       {
-        timeoutMs: numberArg(args, 'timeoutMs') ?? 10_000,
+        timeoutMs,
         intervalMs: numberArg(args, 'intervalMs') ?? 500,
       },
     )
@@ -286,10 +314,10 @@ export function registerCommands(
   })
 
   registry.register('wait-for-state', async (args) => {
+    const predicate = parseStatePredicate(stringArg(args, 'predicate'))
+    const timeoutMs = timeoutArg(args, 10_000)
     const device = await selectDevice(adb, serialArg(args))
     const capture = captures.require(device.serial)
-    const predicate = parseStatePredicate(stringArg(args, 'predicate'))
-    const timeoutMs = numberArg(args, 'timeoutMs') ?? 10_000
 
     const check = (): { key: string; value: unknown } | null => {
       const found = resolveKey(capture.projection, predicate.key)
@@ -299,19 +327,56 @@ export function registerCommands(
       return { key: found.entry.key, value: found.entry.value }
     }
 
+    /**
+     * `matchesState` refuses a stale entry, so a key holding exactly the
+     * expected value can still never match. Reporting that as `E_TIMEOUT`
+     * tells the agent the condition is false, when the truth is that we do
+     * not know — the very confusion spec 5.2 exists to prevent. Distinguish
+     * the two: `E_STATE_STALE` when the value would have matched but for its
+     * staleness, `E_TIMEOUT` when it genuinely did not.
+     */
+    const staleMatch = (): { key: string; seq: number; ageMs: number } | null => {
+      const found = resolveKey(capture.projection, predicate.key)
+      if (!found || !found.entry.stale) return null
+      const fresh = { ...found.entry, stale: false }
+      if (!matchesState(fresh, { ...predicate, path: found.path })) return null
+      return {
+        key: found.entry.key,
+        seq: found.entry.seq,
+        ageMs: Date.now() - found.entry.timestamp,
+      }
+    }
+
+    const timeoutError = (): AgentQaError => {
+      const stale = staleMatch()
+      if (stale) {
+        return new AgentQaError(
+          'E_STATE_STALE',
+          `state key ${stale.key} holds the expected value but is stale — a dropped log line or a dead capture means it may already have been superseded`,
+          {
+            predicate: stringArg(args, 'predicate'),
+            timeoutMs,
+            key: stale.key,
+            seq: stale.seq,
+            ageMs: stale.ageMs,
+            stale: true,
+          },
+        )
+      }
+      return new AgentQaError('E_TIMEOUT', `state condition not met within ${timeoutMs}ms`, {
+        predicate: stringArg(args, 'predicate'),
+        timeoutMs,
+        known: capture.projection.list().map((e) => e.key),
+      })
+    }
+
     const already = check()
     if (already) return { serial: device.serial, ...already }
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         off()
-        reject(
-          new AgentQaError('E_TIMEOUT', `state condition not met within ${timeoutMs}ms`, {
-            predicate: stringArg(args, 'predicate'),
-            timeoutMs,
-            known: capture.projection.list().map((e) => e.key),
-          }),
-        )
+        reject(timeoutError())
       }, timeoutMs)
       const off = capture.projection.onChange(() => {
         const hit = check()
@@ -324,10 +389,12 @@ export function registerCommands(
   })
 
   registry.register('wait-for-event', async (args) => {
+    // Validated before the device is selected, for the same reason the
+    // predicate is: `--timeout 10s` is wrong whatever is plugged in.
+    const name = stringArg(args, 'name')
+    const timeoutMs = timeoutArg(args, 10_000)
     const device = await selectDevice(adb, serialArg(args))
     const capture = captures.require(device.serial)
-    const name = stringArg(args, 'name')
-    const timeoutMs = numberArg(args, 'timeoutMs') ?? 10_000
 
     // Check the ring first: an agent that acts and then waits for the event it
     // caused would otherwise always time out, since the event arrived during
@@ -342,8 +409,21 @@ export function registerCommands(
     // predates the agent's own action, because nothing marks when the wait
     // began. Closing that gap needs a `since` baseline — passed by the agent
     // or captured by the daemon at dispatch — which this change does not add.
+    // Until it does, DISCLOSE: `fromRing` says the match was already in the
+    // ring when the wait started rather than arriving during it, and `ageMs`
+    // says how long ago it fired. An agent can then see for itself that the
+    // "confirmation" predates its own action instead of trusting it blind.
     const seen = capture.projection.events().findLast((e) => e.name === name)
-    if (seen) return { serial: device.serial, name, data: seen.data, seq: seen.seq }
+    if (seen) {
+      return {
+        serial: device.serial,
+        name,
+        data: seen.data,
+        seq: seen.seq,
+        ageMs: Date.now() - seen.timestamp,
+        fromRing: true,
+      }
+    }
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -359,7 +439,14 @@ export function registerCommands(
         if (e.name !== name) return
         clearTimeout(timer)
         off()
-        resolve({ serial: device.serial, name, data: e.data, seq: e.seq })
+        resolve({
+          serial: device.serial,
+          name,
+          data: e.data,
+          seq: e.seq,
+          ageMs: Date.now() - e.timestamp,
+          fromRing: false,
+        })
       })
     })
   })

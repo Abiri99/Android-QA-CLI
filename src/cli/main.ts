@@ -278,16 +278,26 @@ export async function main(
         restarts: number
         running: boolean
         hasGap: boolean
+        lastExitCode: number | null
       }
       emit(
         data,
         () =>
           `running=${data.running} lines=${data.lines} records=${data.records} ` +
-          `pid=${data.pid ?? '-'} restarts=${data.restarts} gap=${data.hasGap}`,
+          `pid=${data.pid ?? '-'} restarts=${data.restarts} gap=${data.hasGap}` +
+          // Only when there is one to report: a dead stream is why the values
+          // suddenly read stale, and this is the evidence for it.
+          (data.lastExitCode === null ? '' : ` lastExit=${data.lastExitCode}`),
         jsonMode(opts),
         out,
       )
     })
+
+  /** Coerces to a number when it is one, and otherwise preserves the input. */
+  const keepUnparseable = (raw: string): number | string => {
+    const n = Number(raw)
+    return Number.isFinite(n) ? n : raw
+  }
 
   program
     .command('wait-for')
@@ -297,10 +307,15 @@ export async function main(
     .argument('<source>', 'what to wait on: screen, state, or event')
     .argument('<predicate>', 'tag=NAME, text="..." for screen; key=value for state; event name for event')
     .option('--device <serial>', 'target device serial')
-    .option('--timeout <ms>', 'give up after this long', Number)
+    // Bare `Number` would turn `--timeout 10s` into NaN, which JSON.stringify
+    // sends as null — leaving the daemon able to say only "null" back. Keep
+    // numbers as numbers, and forward anything else exactly as typed so the
+    // daemon (which owns the validation, since the CLI is not its only caller)
+    // can name the offending value.
+    .option('--timeout <ms>', 'give up after this long', keepUnparseable)
     .option('--interval <ms>', 'poll interval (screen only)', Number)
     .option('--json', 'emit machine-readable JSON')
-    .action(async (source: string, predicate: string, opts: { device?: string; timeout?: number; interval?: number; json?: boolean }) => {
+    .action(async (source: string, predicate: string, opts: { device?: string; timeout?: number | string; interval?: number; json?: boolean }) => {
       if (source === 'state') {
         const data = await client.request('wait-for-state', {
           serial: opts.device,

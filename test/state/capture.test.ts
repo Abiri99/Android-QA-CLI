@@ -10,6 +10,8 @@ class FakeStream implements AdbStream {
   onExit(fn: (c: number | null) => void): void { this.exitFns.push(fn) }
   stop(): void { this.stopped = true; for (const f of this.exitFns) f(0) }
   emit(line: string): void { for (const f of this.lineFns) f(line) }
+  /** The stream dying on its own: adb crashed, the device was unplugged. */
+  die(code: number | null = 1): void { for (const f of this.exitFns) f(code) }
 }
 
 class FakeStreamer implements AdbStreamer {
@@ -146,6 +148,62 @@ describe('Capture', () => {
     expect(cap.stats().running).toBe(false)
   })
 
+  it('a non-record line from a different pid does not reset the projection', () => {
+    const streamer = new FakeStreamer()
+    const cap = new Capture(streamer, 'x')
+    cap.start()
+    const s = streamer.streams[0]!
+    s.emit(wire(100, 1, 'state', 'a', '1'))
+    s.emit('10-04 12:00:02.000  777  777 I AgentQA : hello from another process')
+    expect(cap.projection.get('a')?.value).toBe(1)
+    expect(cap.stats().restarts).toBe(0)
+    expect(cap.stats().pid).toBe(100)
+  })
+
+  it('a genuine record from a different pid still resets the projection', () => {
+    const streamer = new FakeStreamer()
+    const cap = new Capture(streamer, 'x')
+    cap.start()
+    const s = streamer.streams[0]!
+    s.emit(wire(100, 1, 'state', 'a', '1'))
+    s.emit(wire(200, 1, 'state', 'b', '2'))
+    expect(cap.projection.get('a')).toBeUndefined()
+    expect(cap.stats().restarts).toBe(1)
+  })
+
+  it('marks every key stale when the stream exits unexpectedly', () => {
+    const streamer = new FakeStreamer()
+    const cap = new Capture(streamer, 'x')
+    cap.start()
+    const s = streamer.streams[0]!
+    s.emit(wire(100, 1, 'state', 'a', '1'))
+    expect(cap.projection.get('a')?.stale).toBe(false)
+    s.die(1)
+    // A dead `adb logcat` delivers nothing; the last value it delivered can no
+    // longer be claimed to be current.
+    expect(cap.projection.get('a')?.stale).toBe(true)
+    expect(cap.stats()).toMatchObject({ running: false, lastExitCode: 1 })
+  })
+
+  it('a deliberate stop does not mark state stale', () => {
+    const streamer = new FakeStreamer()
+    const cap = new Capture(streamer, 'x')
+    cap.start()
+    streamer.streams[0]!.emit(wire(100, 1, 'state', 'a', '1'))
+    cap.stop()
+    expect(cap.projection.get('a')?.stale).toBe(false)
+  })
+
+  it('restarting after an unexpected exit spawns a fresh stream', () => {
+    const streamer = new FakeStreamer()
+    const cap = new Capture(streamer, 'x')
+    cap.start()
+    streamer.streams[0]!.die(1)
+    cap.start()
+    expect(streamer.streams).toHaveLength(2)
+    expect(cap.stats().running).toBe(true)
+  })
+
   it('start is idempotent and does not spawn a second stream', () => {
     const streamer = new FakeStreamer()
     const cap = new Capture(streamer, 'x')
@@ -159,6 +217,25 @@ describe('CaptureManager', () => {
   it('returns the same capture for a serial', () => {
     const m = new CaptureManager(new FakeStreamer())
     expect(m.attach('a')).toBe(m.attach('a'))
+  })
+
+  it('attach restarts a capture whose stream died, so recovery works', () => {
+    const streamer = new FakeStreamer()
+    const m = new CaptureManager(streamer)
+    const cap = m.attach('a')
+    streamer.streams[0]!.die(1)
+    expect(cap.stats().running).toBe(false)
+    expect(m.attach('a')).toBe(cap)
+    expect(streamer.streams).toHaveLength(2)
+    expect(cap.stats().running).toBe(true)
+  })
+
+  it('attach on a healthy capture does not spawn a second stream', () => {
+    const streamer = new FakeStreamer()
+    const m = new CaptureManager(streamer)
+    m.attach('a')
+    m.attach('a')
+    expect(streamer.streams).toHaveLength(1)
   })
 
   it('keeps captures separate per serial', () => {

@@ -142,6 +142,20 @@ export class Projection {
     return limit === undefined ? [...this.ring] : this.ring.slice(-limit)
   }
 
+  /**
+   * Declares every stored value suspect.
+   *
+   * Used when the capture stream itself dies: nothing arriving is not the same
+   * as nothing changing, and the values held from before the death could have
+   * been superseded many times over on the device. Marking rather than
+   * clearing keeps the last known values readable — with `stale: true` on them,
+   * which is the honest answer.
+   */
+  markAllStale(): void {
+    this.clock += 1
+    this.lastGapOrder = this.clock
+  }
+
   hasGap(): boolean {
     return this.lastGapOrder > 0
   }
