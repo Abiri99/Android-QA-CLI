@@ -2,7 +2,10 @@ import { AgentQaError } from '../core/errors.js'
 import type { AdbRunner } from '../adb/runner.js'
 import { parseHierarchy } from '../ui/parse.js'
 import { compact } from '../ui/compact.js'
-import type { Driver, DriverCapabilities, ScreenOpts, ScreenSnapshot } from './types.js'
+import { encodeInputText } from '../adb/input-text.js'
+import { KEY_CODES } from './types.js'
+import type { Driver, DriverCapabilities, KeyName, ScreenOpts, ScreenSnapshot, TapOpts } from './types.js'
+import type { Point } from '../ui/target.js'
 
 const NOT_IDLE = /could not get idle state/i
 // Android's own spelling. Real captured stdout from
@@ -43,5 +46,36 @@ export class AdbDriver implements Driver {
 
   async screenshot(): Promise<Buffer> {
     return this.adb.binary(['exec-out', 'screencap', '-p'], { serial: this.serial })
+  }
+
+  async tap(point: Point, opts: TapOpts = {}): Promise<void> {
+    const { x, y } = point
+    if (opts.durationMs !== undefined) {
+      // `input tap` has no duration parameter, so a long press is a
+      // zero-distance swipe. This is an adb limitation, not a workaround.
+      await this.adb.text(
+        ['shell', 'input', 'swipe', `${x}`, `${y}`, `${x}`, `${y}`, `${opts.durationMs}`],
+        { serial: this.serial },
+      )
+      return
+    }
+    await this.adb.text(['shell', 'input', 'tap', `${x}`, `${y}`], { serial: this.serial })
+  }
+
+  async swipe(from: Point, to: Point, durationMs = 300): Promise<void> {
+    await this.adb.text(
+      ['shell', 'input', 'swipe', `${from.x}`, `${from.y}`, `${to.x}`, `${to.y}`, `${durationMs}`],
+      { serial: this.serial },
+    )
+  }
+
+  async key(name: KeyName): Promise<void> {
+    await this.adb.text(['shell', 'input', 'keyevent', KEY_CODES[name]], { serial: this.serial })
+  }
+
+  async typeText(text: string): Promise<void> {
+    if (text.length === 0) return
+    const encoded = encodeInputText(text)
+    await this.adb.text(['shell', 'input', 'text', encoded], { serial: this.serial })
   }
 }

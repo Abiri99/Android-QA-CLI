@@ -2153,3 +2153,37 @@ git commit -m "feat: wire act, wait-for, log and doctor commands"
 **Carried forward from phase 1.** `E_UI_NOT_IDLE`'s exact string match is still unproven; Task 8's Step 7 is the first realistic chance to exercise it, since waiting on a loading screen is what makes an animating dump likely. `E_INTERNAL` now carries several meanings — a code split remains a cheap follow-up.
 
 **Not yet covered by any plan.** Spec phases 3–7.
+
+---
+
+## Post-implementation corrections
+
+This plan's sample code shipped four defects, all caught during execution by
+review rather than by transcription, and all of the same shape: **plausible
+wrong behaviour rather than an error**. The shipped code in git is the
+reference for these tasks, not the code blocks above.
+
+| Task | Defect | Where fixed |
+|---|---|---|
+| 2 | `matchElements` had no branch for `{ ref }`, so `resolveOne(elements, {ref:'#3'})` always threw `E_NO_MATCH` — "no element matched #3" — even when `#3` was present. The brief's own tests never exercised a ref target, so transcription could not catch it. Fixed by narrowing to `ElementTarget = Exclude<Target,{ref}>` so a misroute is a compile error, keeping `RefStore` the single ref resolver. | `src/ui/target.ts` |
+| 5 | Knock-on from the Task 2 fix: `Predicate.target` had to narrow to `ElementTarget`, and `parsePredicate` now rejects ref-shaped predicates with `E_BAD_ARGS`. | `src/ui/predicate.ts` |
+| 6 | `THREADTIME_RE`'s tag capture stopped at the **first colon**, so `I Tag:Sub: message` parsed as tag `Tag`, message `Sub: message` — a well-formed, plausible `LogLine` with nothing signalling the loss. Fixed by splitting on the first colon-**space**, since Android always emits `": "` between tag and message and tags never contain spaces. | `src/adb/logcat.ts` |
+| 7 | Ref invalidation ran only after the driver call returned, so an action that reached the device and *then* threw left stale refs resolvable — the plan's central safety property defeated via the exception path. Fixed with `try/finally` around the driver call only, deliberately leaving `pointFor` outside so a failed *resolution* still preserves refs for retry. | `src/daemon/commands.ts` |
+| 7 | `numberArg` returned `undefined` for a present-but-wrong-typed value, so `durationMs: "800"` silently produced no long press while reporting success. Now throws `E_BAD_ARGS` when present and wrong-typed. | `src/daemon/commands.ts` |
+
+Two known limitations were left in deliberately and remain open:
+
+- A **point-shaped predicate** (`wait-for '100,200'`) parses but can never
+  match, since `matchElements` returns nothing for point targets — so it fails
+  only by timing out, with no explanation. Refs are rejected for the same class
+  of reason; points arguably should be too.
+- **`swipe` resolves its two endpoints with two independent fresh screen
+  reads**, so `from` and `to` can be computed against different screen states
+  if the UI moves between them.
+
+Carried forward from phase 1 and **still unproven**: `E_UI_NOT_IDLE`'s exact
+string match. Task 8's real-device verification tried concurrent tap+wait,
+sequential post-load waits, and fling-stress dumps; the error never fired.
+Phase 1's review established it degrades safely — a drifted string yields
+`E_UI_PARSE`, never a silent empty screen — so this is dead-code risk rather
+than correctness risk, but nothing has yet made the guard fire.

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { CommandRegistry } from '../../src/daemon/server.js'
 import { registerCommands, DriverRegistry } from '../../src/daemon/commands.js'
+import { RefStore } from '../../src/daemon/refs.js'
 import { FakeDriver } from '../../src/driver/fake-driver.js'
 import type { AdbRunner } from '../../src/adb/runner.js'
 import type { ScreenElement } from '../../src/ui/compact.js'
@@ -20,7 +21,7 @@ const adb: AdbRunner = {
 
 function build(): CommandRegistry {
   const registry = new CommandRegistry()
-  registerCommands(registry, new DriverRegistry(adb), adb)
+  registerCommands(registry, new DriverRegistry(adb), adb, new RefStore())
   return registry
 }
 
@@ -49,7 +50,7 @@ describe('registerCommands', () => {
       async binary() { return Buffer.alloc(0) },
     }
     const registry = new CommandRegistry()
-    registerCommands(registry, new DriverRegistry(empty), empty)
+    registerCommands(registry, new DriverRegistry(empty), empty, new RefStore())
     const res = await registry.dispatch({ id: '4', version: '0.1.0', cmd: 'screen', args: {} })
     expect(res).toMatchObject({ ok: false, error: { error: 'E_NO_DEVICE' } })
   })
@@ -67,7 +68,7 @@ describe('registerCommands', () => {
       },
     }
     const registry = new CommandRegistry()
-    registerCommands(registry, new DriverRegistry(untouched), untouched)
+    registerCommands(registry, new DriverRegistry(untouched), untouched, new RefStore())
     const res = await registry.dispatch({ id: '5', version: '0.1.0', cmd: 'ping', args: {} })
     expect(res).toMatchObject({ ok: true, data: { ok: true } })
     expect(adbCalled).toBe(false)
@@ -125,7 +126,7 @@ describe('registerCommands against a FakeDriver', () => {
       serials.push(serial)
       return new FakeDriver({ elements, raw: '<hierarchy/>' }, png)
     })
-    registerCommands(registry, drivers, listOnly)
+    registerCommands(registry, drivers, listOnly, new RefStore())
     return { registry, serials }
   }
 

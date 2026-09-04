@@ -83,6 +83,22 @@ export class DaemonClient {
     )
   }
 
+  /**
+   * The client bound must always outlive the daemon's own deadline, or the
+   * daemon's coded answer loses a race it should win. `wait-for --timeout
+   * 120000` used to fail at the fixed 60s bound with `E_INTERNAL: daemon did
+   * not respond` while the daemon happily kept polling — an agent branching on
+   * `E_TIMEOUT` got `E_INTERNAL` instead. So when a command carries its own
+   * timeout, add the standard bound to it as the margin: enough for the poll
+   * that straddles the deadline (an adb read is bounded at 30s) plus the
+   * round trip. With no `timeoutMs` the standard bound is unchanged.
+   */
+  private timeoutFor(args: Record<string, unknown>): number {
+    const own = args.timeoutMs
+    if (typeof own !== 'number' || !Number.isFinite(own) || own <= 0) return this.requestTimeoutMs
+    return this.requestTimeoutMs + own
+  }
+
   // Resolves or rejects exactly once. Beyond the "matching response arrived"
   // path, the socket can also close (server crash, unexpected disconnect)
   // or error out without ever delivering a response with this request's id
@@ -90,6 +106,7 @@ export class DaemonClient {
   // promise pending forever instead of surfacing a coded error.
   private send(cmd: string, args: Record<string, unknown>): Promise<unknown> {
     const id = randomUUID()
+    const timeoutMs = this.timeoutFor(args)
     return new Promise((resolve, reject) => {
       const decoder = new FrameDecoder()
       const socket = connect(this.socketPath)
@@ -112,12 +129,12 @@ export class DaemonClient {
           reject(
             new AgentQaError(
               'E_INTERNAL',
-              `daemon did not respond within ${this.requestTimeoutMs}ms`,
+              `daemon did not respond within ${timeoutMs}ms`,
               { socket: this.socketPath, cmd },
             ),
           ),
         )
-      }, this.requestTimeoutMs)
+      }, timeoutMs)
       timer.unref?.()
 
       socket.on('connect', () => {
