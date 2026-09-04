@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { encode, FrameDecoder } from '../../src/ipc/protocol.js'
+import { encode, FrameDecoder, FrameDecodeError } from '../../src/ipc/protocol.js'
 import type { IpcRequest } from '../../src/ipc/protocol.js'
 
 const req: IpcRequest = { id: 'a1', version: '0.1.0', cmd: 'screen', args: { full: false } }
@@ -40,5 +40,44 @@ describe('FrameDecoder', () => {
   it('throws on a malformed line rather than silently dropping it', () => {
     const d = new FrameDecoder()
     expect(() => d.push(Buffer.from('not json\n'))).toThrowError()
+  })
+
+  it('reassembles a multi-byte UTF-8 character split across chunk boundaries', () => {
+    const withEmoji: IpcRequest = {
+      id: 'a2',
+      version: '0.1.0',
+      cmd: 'screen',
+      args: { text: 'emoji \u{1F600} and CJK 你好 world' },
+    }
+    const line = encode(withEmoji)
+    const bytes = Buffer.from(line, 'utf8')
+    // Find a byte offset that lands inside a multi-byte character's encoding
+    // (i.e. a continuation byte, top two bits `10`).
+    let cut = -1
+    for (let i = 1; i < bytes.length; i++) {
+      const byte = bytes[i]
+      if (byte !== undefined && (byte & 0xc0) === 0x80) {
+        cut = i
+        break
+      }
+    }
+    expect(cut).toBeGreaterThan(0)
+
+    const d = new FrameDecoder()
+    expect(d.push(bytes.subarray(0, cut))).toEqual([])
+    expect(d.push(bytes.subarray(cut))).toEqual([withEmoji])
+  })
+
+  it('carries already-decoded messages on the thrown error when a later line is malformed', () => {
+    const d = new FrameDecoder()
+    const chunk = Buffer.from(encode(req) + 'not json\n')
+    let caught: unknown
+    try {
+      d.push(chunk)
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).toBeInstanceOf(FrameDecodeError)
+    expect((caught as FrameDecodeError).decoded).toEqual([req])
   })
 })
