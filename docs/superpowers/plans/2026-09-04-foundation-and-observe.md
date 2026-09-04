@@ -1450,6 +1450,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Write `src/ipc/protocol.ts`**
 
 ```typescript
+import { StringDecoder } from 'node:string_decoder'
 import type { AgentQaErrorJson } from '../core/errors.js'
 
 export interface IpcRequest {
@@ -1469,18 +1470,39 @@ export function encode(msg: IpcMessage): string {
   return JSON.stringify(msg) + '\n'
 }
 
+export class FrameDecodeError extends Error {
+  readonly decoded: IpcMessage[]
+  readonly line: string
+  constructor(line: string, decoded: IpcMessage[], cause: unknown) {
+    super(`malformed frame: ${line.slice(0, 120)}`, { cause })
+    this.name = 'FrameDecodeError'
+    this.decoded = decoded
+    this.line = line
+  }
+}
+
 export class FrameDecoder {
   private buffer = ''
+  // Holds partial multi-byte UTF-8 sequences across push() calls; a plain
+  // `chunk.toString('utf8')` per chunk would decode a split sequence as
+  // U+FFFD before the rest of its bytes arrive.
+  private readonly decoder = new StringDecoder('utf8')
 
   push(chunk: Buffer): IpcMessage[] {
-    this.buffer += chunk.toString('utf8')
+    this.buffer += this.decoder.write(chunk)
     const out: IpcMessage[] = []
     let idx: number
     while ((idx = this.buffer.indexOf('\n')) !== -1) {
       const line = this.buffer.slice(0, idx)
       this.buffer = this.buffer.slice(idx + 1)
       if (line.trim().length === 0) continue
-      out.push(JSON.parse(line) as IpcMessage)
+      try {
+        out.push(JSON.parse(line) as IpcMessage)
+      } catch (cause) {
+        // Carry what we already decoded, so a bad line later in the same
+        // chunk does not silently swallow a good message before it.
+        throw new FrameDecodeError(line, out, cause)
+      }
     }
     return out
   }
