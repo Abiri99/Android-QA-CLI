@@ -11,6 +11,8 @@ import { readLogs, readCrashes } from '../adb/logcat.js'
 import { KEY_CODES } from '../driver/types.js'
 import type { KeyName } from '../driver/types.js'
 import { AgentQaError } from '../core/errors.js'
+import type { CaptureManager } from '../state/capture.js'
+import { parseStatePredicate, matchesState, resolveKey, readPath } from '../state/query.js'
 
 /**
  * Builds the driver for one device serial. This is the seam the spec's
@@ -87,6 +89,7 @@ export function registerCommands(
   drivers: DriverRegistry,
   adb: AdbRunner,
   refs: RefStore,
+  captures: CaptureManager,
 ): void {
   registry.register('ping', async () => ({ ok: true }))
 
@@ -221,7 +224,125 @@ export function registerCommands(
     return { serial: device.serial, pngBase64: png.toString('base64') }
   })
 
+  registry.register('state-attach', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    captures.attach(device.serial)
+    return { ok: true, serial: device.serial }
+  })
+
+  registry.register('state-detach', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    captures.detach(device.serial)
+    return { ok: true, serial: device.serial }
+  })
+
+  registry.register('state-get', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    const capture = captures.require(device.serial)
+    const dotted = stringArg(args, 'key')
+    const found = resolveKey(capture.projection, dotted)
+    if (!found) {
+      throw new AgentQaError('E_NO_MATCH', `no state key matching ${dotted}`, {
+        key: dotted,
+        known: capture.projection.list().map((e) => e.key),
+      })
+    }
+    const { entry, path } = found
+    const value = readPath(entry.value, path)
+    return {
+      serial: device.serial,
+      key: entry.key,
+      path,
+      value,
+      seq: entry.seq,
+      ageMs: Date.now() - entry.timestamp,
+      stale: entry.stale,
+    }
+  })
+
+  registry.register('state-list', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    const capture = captures.require(device.serial)
+    return { serial: device.serial, entries: capture.projection.list() }
+  })
+
+  registry.register('state-stats', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    const capture = captures.require(device.serial)
+    return { serial: device.serial, ...capture.stats(), hasGap: capture.projection.hasGap() }
+  })
+
+  registry.register('wait-for-state', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    const capture = captures.require(device.serial)
+    const predicate = parseStatePredicate(stringArg(args, 'predicate'))
+    const timeoutMs = numberArg(args, 'timeoutMs') ?? 10_000
+
+    const check = (): { key: string; value: unknown } | null => {
+      const found = resolveKey(capture.projection, predicate.key)
+      if (!found) return null
+      const scoped = { ...predicate, path: found.path }
+      if (!matchesState(found.entry, scoped)) return null
+      return { key: found.entry.key, value: found.entry.value }
+    }
+
+    const already = check()
+    if (already) return { serial: device.serial, ...already }
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        off()
+        reject(
+          new AgentQaError('E_TIMEOUT', `state condition not met within ${timeoutMs}ms`, {
+            predicate: stringArg(args, 'predicate'),
+            timeoutMs,
+            known: capture.projection.list().map((e) => e.key),
+          }),
+        )
+      }, timeoutMs)
+      const off = capture.projection.onChange(() => {
+        const hit = check()
+        if (!hit) return
+        clearTimeout(timer)
+        off()
+        resolve({ serial: device.serial, ...hit })
+      })
+    })
+  })
+
+  registry.register('wait-for-event', async (args) => {
+    const device = await selectDevice(adb, serialArg(args))
+    const capture = captures.require(device.serial)
+    const name = stringArg(args, 'name')
+    const timeoutMs = numberArg(args, 'timeoutMs') ?? 10_000
+
+    // Check the ring first: an agent that acts and then waits for the event it
+    // caused would otherwise always time out, since the event arrived during
+    // the round trip.
+    const seen = capture.projection.events().find((e) => e.name === name)
+    if (seen) return { serial: device.serial, name, data: seen.data, seq: seen.seq }
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        off()
+        reject(
+          new AgentQaError('E_TIMEOUT', `event ${name} did not arrive within ${timeoutMs}ms`, {
+            name,
+            timeoutMs,
+          }),
+        )
+      }, timeoutMs)
+      const off = capture.projection.onEvent((e) => {
+        if (e.name !== name) return
+        clearTimeout(timer)
+        off()
+        resolve({ serial: device.serial, name, data: e.data, seq: e.seq })
+      })
+    })
+  })
+
   registry.register('shutdown', async () => {
+    captures.detachAll()
     setTimeout(() => process.exit(0), 50)
     return { stopping: true }
   })

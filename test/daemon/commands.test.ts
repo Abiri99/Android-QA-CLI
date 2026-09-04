@@ -4,10 +4,28 @@ import { CommandRegistry } from '../../src/daemon/server.js'
 import { registerCommands, DriverRegistry } from '../../src/daemon/commands.js'
 import { RefStore } from '../../src/daemon/refs.js'
 import { FakeDriver } from '../../src/driver/fake-driver.js'
+import { CaptureManager } from '../../src/state/capture.js'
 import type { AdbRunner } from '../../src/adb/runner.js'
+import type { AdbStream, AdbStreamer } from '../../src/adb/stream.js'
 import type { ScreenElement } from '../../src/ui/compact.js'
 
 const xml = readFileSync(new URL('../fixtures/hierarchy-simple.xml', import.meta.url), 'utf8')
+
+// A minimal streamer whose stream never emits — these tests exercise the
+// non-state command surface and have no interest in capture behavior.
+class NullStream implements AdbStream {
+  onLine(): void {}
+  onExit(): void {}
+  stop(): void {}
+}
+class NullStreamer implements AdbStreamer {
+  stream(): AdbStream {
+    return new NullStream()
+  }
+}
+function nullCaptures(): CaptureManager {
+  return new CaptureManager(new NullStreamer())
+}
 
 const adb: AdbRunner = {
   async text(args) {
@@ -21,7 +39,7 @@ const adb: AdbRunner = {
 
 function build(): CommandRegistry {
   const registry = new CommandRegistry()
-  registerCommands(registry, new DriverRegistry(adb), adb, new RefStore())
+  registerCommands(registry, new DriverRegistry(adb), adb, new RefStore(), nullCaptures())
   return registry
 }
 
@@ -50,7 +68,7 @@ describe('registerCommands', () => {
       async binary() { return Buffer.alloc(0) },
     }
     const registry = new CommandRegistry()
-    registerCommands(registry, new DriverRegistry(empty), empty, new RefStore())
+    registerCommands(registry, new DriverRegistry(empty), empty, new RefStore(), nullCaptures())
     const res = await registry.dispatch({ id: '4', version: '0.1.0', cmd: 'screen', args: {} })
     expect(res).toMatchObject({ ok: false, error: { error: 'E_NO_DEVICE' } })
   })
@@ -68,7 +86,7 @@ describe('registerCommands', () => {
       },
     }
     const registry = new CommandRegistry()
-    registerCommands(registry, new DriverRegistry(untouched), untouched, new RefStore())
+    registerCommands(registry, new DriverRegistry(untouched), untouched, new RefStore(), nullCaptures())
     const res = await registry.dispatch({ id: '5', version: '0.1.0', cmd: 'ping', args: {} })
     expect(res).toMatchObject({ ok: true, data: { ok: true } })
     expect(adbCalled).toBe(false)
@@ -126,7 +144,7 @@ describe('registerCommands against a FakeDriver', () => {
       serials.push(serial)
       return new FakeDriver({ elements, raw: '<hierarchy/>' }, png)
     })
-    registerCommands(registry, drivers, listOnly, new RefStore())
+    registerCommands(registry, drivers, listOnly, new RefStore(), nullCaptures())
     return { registry, serials }
   }
 
