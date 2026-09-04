@@ -1,28 +1,61 @@
 import { writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { CommanderError } from 'commander'
 import { DaemonClient } from '../ipc/client.js'
 import { daemonSocketPath } from '../core/paths.js'
 import { renderScreen } from '../ui/compact.js'
 import type { ScreenElement } from '../ui/compact.js'
 import type { Device } from '../adb/devices.js'
+import { AgentQaError } from '../core/errors.js'
 import { buildCli } from './index.js'
 import { emit, emitError, renderDevices } from './output.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../../package.json') as { version: string }
 
-export async function main(argv: string[]): Promise<number> {
+// commander.js codes for a successful `--help`/`--version` invocation under
+// `exitOverride()`: these throw a `CommanderError` just like a genuine parse
+// failure, but they are not errors and must exit 0 with their normal output
+// intact.
+const COMMANDER_SUCCESS_CODES = new Set([
+  'commander.helpDisplayed',
+  'commander.help',
+  'commander.version',
+])
+
+export async function main(
+  argv: string[],
+  out: (s: string) => void = (s) => process.stdout.write(s + '\n'),
+): Promise<number> {
   const program = buildCli(version)
   const client = new DaemonClient(daemonSocketPath(), version)
-  const out = (s: string) => process.stdout.write(s + '\n')
   let exitCode = 0
 
   // `--json` is accepted both before and after the subcommand, because an
   // agent composing a command line has no reason to know which position
   // commander prefers. Each subcommand therefore declares it too, and this
-  // helper accepts either.
+  // helper accepts either. It also covers commander's own parse errors
+  // (missing required option, unknown subcommand, ...), which are thrown
+  // before any subcommand action runs and so before `opts()` reflects
+  // anything below the top level — checking the raw argv is the only
+  // reliable way to know which mode was requested in that case.
   const jsonMode = (opts?: { json?: boolean }) =>
-    program.opts().json === true || opts?.json === true
+    program.opts().json === true || opts?.json === true || argv.includes('--json')
+
+  // Parse errors (missing required option, unknown subcommand, ...) call
+  // `process.exit(1)` from inside commander itself by default, before the
+  // `parseAsync` promise ever settles — bypassing `emitError` and printing
+  // commander's own plain text regardless of `--json`. `exitOverride` makes
+  // commander throw a catchable `CommanderError` instead, and
+  // `configureOutput` stops commander from writing its own error text so the
+  // single rendering below (via `emitError`) is the only output. `--help`
+  // and `--version` also throw under `exitOverride`, but they still write
+  // their normal text via `writeOut`, which is left in place.
+  program.exitOverride()
+  program.configureOutput({
+    writeOut: (str) => out(str.replace(/\n+$/, '')),
+    writeErr: () => undefined,
+  })
 
   program
     .command('devices')
@@ -79,7 +112,15 @@ export async function main(argv: string[]): Promise<number> {
   try {
     await program.parseAsync(argv, { from: 'user' })
   } catch (e) {
-    exitCode = emitError(e, jsonMode(), out)
+    if (e instanceof CommanderError) {
+      if (COMMANDER_SUCCESS_CODES.has(e.code)) {
+        exitCode = 0
+      } else {
+        exitCode = emitError(new AgentQaError('E_BAD_ARGS', e.message), jsonMode(), out)
+      }
+    } else {
+      exitCode = emitError(e, jsonMode(), out)
+    }
   }
   return exitCode
 }

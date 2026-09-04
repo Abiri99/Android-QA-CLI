@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { renderDevices, emit, emitError } from '../../src/cli/output.js'
 import { AgentQaError } from '../../src/core/errors.js'
+import { main } from '../../src/cli/main.js'
 
 function sink() {
   const lines: string[] = []
@@ -55,5 +56,41 @@ describe('emitError', () => {
     const s = sink()
     expect(emitError(new TypeError('boom'), true, s.write)).toBe(2)
     expect(JSON.parse(s.lines[0]!).error).toBe('E_INTERNAL')
+  })
+})
+
+describe('main: commander parse errors honor --json', () => {
+  it('a missing required option under --json produces the JSON error shape and exits 1', async () => {
+    const s = sink()
+    const code = await main(['screenshot', '--json'], s.write)
+    expect(code).toBe(1)
+    expect(s.lines).toHaveLength(1)
+    const parsed = JSON.parse(s.lines[0]!)
+    expect(parsed.error).toBe('E_BAD_ARGS')
+    expect(typeof parsed.message).toBe('string')
+  })
+
+  it('an unknown subcommand under --json produces the JSON error shape and exits 1', async () => {
+    const s = sink()
+    const code = await main(['bogus-command', '--json'], s.write)
+    expect(code).toBe(1)
+    expect(s.lines).toHaveLength(1)
+    const parsed = JSON.parse(s.lines[0]!)
+    expect(parsed.error).toBe('E_BAD_ARGS')
+  })
+
+  it('--version still exits 0 and prints the version', async () => {
+    const s = sink()
+    const code = await main(['--version'], s.write)
+    expect(code).toBe(0)
+    expect(s.lines).toHaveLength(1)
+    expect(s.lines[0]).toMatch(/^\d+\.\d+\.\d+$/)
+  })
+
+  it('--help still exits 0', async () => {
+    const s = sink()
+    const code = await main(['--help'], s.write)
+    expect(code).toBe(0)
+    expect(s.lines.join('\n')).toMatch(/Usage:/)
   })
 })
