@@ -40,6 +40,7 @@ export class Capture {
   private chunkSpan = 0
   private lastExitCode: number | null = null
   private stopping = false
+  private endHandlers = new Set<() => void>()
 
   constructor(
     private readonly streamer: AdbStreamer,
@@ -60,8 +61,16 @@ export class Capture {
     stream.onExit((code) => {
       // Only the stream we currently hold may retire the capture; a late exit
       // from a stream we already replaced must not clear a live one.
-      if (this.stream === stream) this.stream = null
+      const wasCurrent = this.stream === stream
+      if (wasCurrent) this.stream = null
       this.lastExitCode = code
+      // Wake anything waiting on this capture before deciding whether the exit
+      // was deliberate: a wait cannot observe anything either way, and leaving
+      // it to discover that at its own timeout leaves the agent blind for the
+      // whole of it. Only the stream we currently hold may do this — a late
+      // exit from one we already replaced retires nothing, and waking a wait
+      // that is watching the live stream would end it for no reason.
+      if (wasCurrent) this.notifyEnd()
       if (this.stopping) return
       // The stream died on its own — device unplugged, `adb kill-server`, a
       // USB reset. Everything in the projection is now frozen at whatever the
@@ -104,6 +113,30 @@ export class Capture {
 
     this.projection.apply(assembled, Date.now(), this.chunkSpan)
     this.chunkSpan = 0
+  }
+
+  /**
+   * Subscribes to this capture's stream ending, for any reason. Returns an
+   * unsubscribe function.
+   *
+   * A pending wait has no other way to learn the stream died: `markAllStale()`
+   * does not notify the projection's subscribers, so nothing else would wake
+   * it before its own timeout fired.
+   */
+  onEnd(fn: () => void): () => void {
+    this.endHandlers.add(fn)
+    return () => this.endHandlers.delete(fn)
+  }
+
+  private notifyEnd(): void {
+    for (const fn of this.endHandlers) {
+      try {
+        fn()
+      } catch {
+        // A subscriber that throws must not stop the others, nor derail the
+        // exit handling that still has to mark the projection stale.
+      }
+    }
   }
 
   stop(): void {

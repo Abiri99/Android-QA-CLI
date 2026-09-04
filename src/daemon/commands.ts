@@ -114,13 +114,7 @@ function keyNameArg(args: Record<string, unknown>): KeyName {
 /**
  * Returns an error when the device's capture stream has died, or null while it
  * is healthy.
- *
- * Known limit: a stream that dies *during* a pending wait is not detected until
- * that wait's timeout fires, because `markAllStale()` does not notify the
- * projection's subscribers and nothing else wakes the promise. The verdict is
- * then correct, but it arrives late — with a long `--timeout` the agent sits
- * blind until it elapses. Fixing that needs a death notification the waits can
- * subscribe to.
+
  *
  * A wait cannot distinguish "the condition is false" from "we stopped receiving
  * lines" unless it asks. Reporting a blind wait as `E_TIMEOUT` is the failure
@@ -131,6 +125,13 @@ function keyNameArg(args: Record<string, unknown>): KeyName {
  * identical to never having attached — run `agentqa state attach`, which
  * restarts a dead capture.
  */
+function captureEndedError(capture: Capture, serial: string): AgentQaError {
+  return (
+    deadCaptureError(capture, serial) ??
+    new AgentQaError('E_NOT_ATTACHED', `the capture stream for ${serial} ended`, { serial })
+  )
+}
+
 function deadCaptureError(capture: Capture, serial: string): AgentQaError | null {
   const stats = capture.stats()
   if (stats.running) return null
@@ -409,17 +410,25 @@ export function registerCommands(
     if (deadOnEntry) throw deadOnEntry
 
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const settle = (fn: () => void): void => {
+        clearTimeout(timer)
         off()
-        reject(deadCaptureError(capture, device.serial) ?? timeoutError())
+        offEnd()
+        fn()
+      }
+      const timer = setTimeout(() => {
+        settle(() => reject(deadCaptureError(capture, device.serial) ?? timeoutError()))
       }, timeoutMs)
       const off = capture.projection.onChange(() => {
         const hit = check()
         if (!hit) return
-        clearTimeout(timer)
-        off()
-        resolve({ serial: device.serial, ...hit })
+        settle(() => resolve({ serial: device.serial, ...hit }))
       })
+      // The stream ending means nothing further can arrive, so end the wait now
+      // rather than leaving the agent blind until its own timeout.
+      const offEnd = capture.onEnd(() =>
+        settle(() => reject(captureEndedError(capture, device.serial))),
+      )
     })
   })
 
@@ -466,28 +475,40 @@ export function registerCommands(
     if (deadOnEntry) throw deadOnEntry
 
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        off()
-        reject(
-          deadCaptureError(capture, device.serial) ??
-            new AgentQaError('E_TIMEOUT', `event ${name} did not arrive within ${timeoutMs}ms`, {
-              name,
-              timeoutMs,
-            }),
-        )
-      }, timeoutMs)
-      const off = capture.projection.onEvent((e) => {
-        if (e.name !== name) return
+      const settle = (fn: () => void): void => {
         clearTimeout(timer)
         off()
-        resolve({
-          serial: device.serial,
-          name,
-          data: e.data,
-          seq: e.seq,
-          ageMs: Date.now() - e.timestamp,
-          fromRing: false,
-        })
+        offEnd()
+        fn()
+      }
+      const timer = setTimeout(() => {
+        settle(() =>
+          reject(
+            deadCaptureError(capture, device.serial) ??
+              new AgentQaError('E_TIMEOUT', `event ${name} did not arrive within ${timeoutMs}ms`, {
+                name,
+                timeoutMs,
+              }),
+          ),
+        )
+      }, timeoutMs)
+      // The stream ending means nothing further can arrive, so end the wait now
+      // rather than leaving the agent blind until its own timeout.
+      const offEnd = capture.onEnd(() =>
+        settle(() => reject(captureEndedError(capture, device.serial))),
+      )
+      const off = capture.projection.onEvent((e) => {
+        if (e.name !== name) return
+        settle(() =>
+          resolve({
+            serial: device.serial,
+            name,
+            data: e.data,
+            seq: e.seq,
+            ageMs: Date.now() - e.timestamp,
+            fromRing: false,
+          }),
+        )
       })
     })
   })
