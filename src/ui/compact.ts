@@ -25,8 +25,8 @@ function isInteresting(n: UiNode): boolean {
   return isInteractive(n) || n.text.length > 0 || n.desc.length > 0
 }
 
-function hasInterestingDescendant(n: UiNode): boolean {
-  return n.children.some((c) => (hasArea(c.bounds) && isInteractive(c)) || hasInterestingDescendant(c))
+function hasInteractiveDescendant(n: UiNode): boolean {
+  return n.children.some((c) => (hasArea(c.bounds) && isInteractive(c)) || hasInteractiveDescendant(c))
 }
 
 function firstText(n: UiNode): string {
@@ -54,32 +54,26 @@ function truncate(s: string): string {
 export function compact(root: UiNode): ScreenElement[] {
   const out: ScreenElement[] = []
 
+  function pushElement(n: UiNode, text: string): void {
+    out.push({
+      ref: `#${out.length + 1}`,
+      role: roleOf(n),
+      text: truncate(text),
+      testTag: n.testTag,
+      viewId: n.viewId,
+      bounds: n.bounds,
+      enabled: n.enabled,
+      tappable: isInteractive(n),
+    })
+  }
+
   function walk(n: UiNode): void {
     const usable = hasArea(n.bounds)
-    if (usable && isInteresting(n) && !hasInterestingDescendant(n)) {
-      out.push({
-        ref: `#${out.length + 1}`,
-        role: roleOf(n),
-        text: truncate(firstText(n)),
-        testTag: n.testTag,
-        viewId: n.viewId,
-        bounds: n.bounds,
-        enabled: n.enabled,
-        tappable: isInteractive(n),
-      })
+    if (usable && isInteresting(n) && !hasInteractiveDescendant(n)) {
+      pushElement(n, firstText(n))
       return // merged: descendants are absorbed
-    }
-    if (usable && isInteresting(n)) {
-      out.push({
-        ref: `#${out.length + 1}`,
-        role: roleOf(n),
-        text: truncate(n.text || n.desc),
-        testTag: n.testTag,
-        viewId: n.viewId,
-        bounds: n.bounds,
-        enabled: n.enabled,
-        tappable: isInteractive(n),
-      })
+    } else if (usable && isInteresting(n)) {
+      pushElement(n, n.text || n.desc)
     }
     for (const c of n.children) walk(c)
   }
