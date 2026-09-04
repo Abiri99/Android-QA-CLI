@@ -3,10 +3,28 @@ import { CommandRegistry } from '../../src/daemon/server.js'
 import { registerCommands, DriverRegistry } from '../../src/daemon/commands.js'
 import { RefStore } from '../../src/daemon/refs.js'
 import { FakeDriver } from '../../src/driver/fake-driver.js'
+import { CaptureManager } from '../../src/state/capture.js'
 import type { AdbRunner } from '../../src/adb/runner.js'
+import type { AdbStream, AdbStreamer } from '../../src/adb/stream.js'
 import type { ScreenElement } from '../../src/ui/compact.js'
 import type { Driver, KeyName } from '../../src/driver/types.js'
 import type { Point } from '../../src/ui/target.js'
+
+// A minimal streamer whose stream never emits — these tests exercise act
+// commands and have no interest in capture behavior.
+class NullStream implements AdbStream {
+  onLine(): void {}
+  onExit(): void {}
+  stop(): void {}
+}
+class NullStreamer implements AdbStreamer {
+  stream(): AdbStream {
+    return new NullStream()
+  }
+}
+function nullCaptures(): CaptureManager {
+  return new CaptureManager(new NullStreamer())
+}
 
 function el(ref: string, over: Partial<ScreenElement> = {}): ScreenElement {
   return {
@@ -34,7 +52,7 @@ function build(elements: ScreenElement[] = [el('#1')]) {
   const fake = new FakeDriver({ elements })
   const refs = new RefStore()
   const registry = new CommandRegistry()
-  registerCommands(registry, new DriverRegistry(adb, () => fake), adb, refs)
+  registerCommands(registry, new DriverRegistry(adb, () => fake), adb, refs, nullCaptures())
   const call = (cmd: string, args: Record<string, unknown> = {}) =>
     registry.dispatch({ id: 'x', version: '0.1.0', cmd, args })
   return { fake, refs, call }
@@ -74,7 +92,7 @@ function reordering(first: ScreenElement[], later: ScreenElement[]) {
   }
   const refs = new RefStore()
   const registry = new CommandRegistry()
-  registerCommands(registry, new DriverRegistry(adb, () => driver), adb, refs)
+  registerCommands(registry, new DriverRegistry(adb, () => driver), adb, refs, nullCaptures())
   return {
     actions,
     refs,

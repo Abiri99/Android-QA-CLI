@@ -15,6 +15,8 @@ export type ErrorCode =
   | 'E_AMBIGUOUS_MATCH'
   | 'E_UNSUPPORTED_TEXT'
   | 'E_TIMEOUT'
+  | 'E_NOT_ATTACHED'
+  | 'E_STATE_STALE'
 
 export interface AgentQaErrorJson {
   error: ErrorCode

@@ -196,25 +196,148 @@ export async function main(
       emit(data, () => `pressed ${name}`, jsonMode(opts), out)
     })
 
+  const state = program
+    .command('state')
+    .description("read the app's internal state, captured from its logcat output")
+
+  state
+    .command('attach')
+    .description('start capturing state; run this BEFORE launching the app, or early state is missed')
+    .option('--device <serial>', 'target device serial')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { device?: string; json?: boolean }) => {
+      const data = await client.request('state-attach', { serial: opts.device })
+      emit(data, () => 'attached', jsonMode(opts), out)
+    })
+
+  state
+    .command('detach')
+    .description('stop capturing state')
+    .option('--device <serial>', 'target device serial')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { device?: string; json?: boolean }) => {
+      const data = await client.request('state-detach', { serial: opts.device })
+      emit(data, () => 'detached', jsonMode(opts), out)
+    })
+
+  state
+    .command('get')
+    .description('read one state key; a dotted name resolves to the longest matching key plus a path')
+    .argument('<key>', 'e.g. auth, or auth.authenticated')
+    .option('--device <serial>', 'target device serial')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (key: string, opts: { device?: string; json?: boolean }) => {
+      const data = (await client.request('state-get', { serial: opts.device, key })) as {
+        key: string
+        value: unknown
+        ageMs: number
+        stale: boolean
+      }
+      emit(
+        data,
+        () =>
+          `${data.key} = ${JSON.stringify(data.value)} (${data.ageMs}ms ago)` +
+          (data.stale ? ' [stale: a dropped log line may have superseded this]' : ''),
+        jsonMode(opts),
+        out,
+      )
+    })
+
+  state
+    .command('list')
+    .description('list every captured state key')
+    .option('--device <serial>', 'target device serial')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { device?: string; json?: boolean }) => {
+      const data = (await client.request('state-list', { serial: opts.device })) as {
+        entries: { key: string; value: unknown; stale: boolean }[]
+      }
+      emit(
+        data,
+        () =>
+          data.entries.length === 0
+            ? '(no state captured yet)'
+            : data.entries
+                .map((e) => `${e.key} = ${JSON.stringify(e.value)}${e.stale ? ' [stale]' : ''}`)
+                .join('\n'),
+        jsonMode(opts),
+        out,
+      )
+    })
+
+  state
+    .command('stats')
+    .description('capture counters, for diagnosing a quiet or lossy stream')
+    .option('--device <serial>', 'target device serial')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { device?: string; json?: boolean }) => {
+      const data = (await client.request('state-stats', { serial: opts.device })) as {
+        lines: number
+        records: number
+        pid: number | null
+        restarts: number
+        running: boolean
+        hasGap: boolean
+        lastExitCode: number | null
+      }
+      emit(
+        data,
+        () =>
+          `running=${data.running} lines=${data.lines} records=${data.records} ` +
+          `pid=${data.pid ?? '-'} restarts=${data.restarts} gap=${data.hasGap}` +
+          // Only when there is one to report: a dead stream is why the values
+          // suddenly read stale, and this is the evidence for it.
+          (data.lastExitCode === null ? '' : ` lastExit=${data.lastExitCode}`),
+        jsonMode(opts),
+        out,
+      )
+    })
+
+  /** Coerces to a number when it is one, and otherwise preserves the input. */
+  const keepUnparseable = (raw: string): number | string => {
+    const n = Number(raw)
+    return Number.isFinite(n) ? n : raw
+  }
+
   program
     .command('wait-for')
-    .description('wait until a screen condition holds (polls the device, ~1-2s per attempt under the adb driver)')
-    // `screen` is explicit because spec 9 also defines `wait-for state` and
-    // `wait-for event` over the logcat projection. Shipping the bare form
-    // would make adding those a breaking change to a command agents already
-    // learned. Unlike this one, `wait-for state` will be event-driven and
-    // free — this form costs a screen read per attempt.
-    .argument('<source>', 'what to wait on (currently only: screen)')
-    .argument('<predicate>', 'tag=NAME, text="...", or !tag=NAME to wait for absence')
+    .description(
+      'wait until a condition holds — `screen` polls the device (~1-2s per attempt under the adb driver); `state` and `event` are event-driven and cost nothing',
+    )
+    .argument('<source>', 'what to wait on: screen, state, or event')
+    .argument('<predicate>', 'tag=NAME, text="..." for screen; key=value for state; event name for event')
     .option('--device <serial>', 'target device serial')
-    .option('--timeout <ms>', 'give up after this long', Number)
-    .option('--interval <ms>', 'poll interval', Number)
+    // Bare `Number` would turn `--timeout 10s` into NaN, which JSON.stringify
+    // sends as null — leaving the daemon able to say only "null" back. Keep
+    // numbers as numbers, and forward anything else exactly as typed so the
+    // daemon (which owns the validation, since the CLI is not its only caller)
+    // can name the offending value.
+    .option('--timeout <ms>', 'give up after this long', keepUnparseable)
+    .option('--interval <ms>', 'poll interval (screen only)', Number)
     .option('--json', 'emit machine-readable JSON')
-    .action(async (source: string, predicate: string, opts: { device?: string; timeout?: number; interval?: number; json?: boolean }) => {
+    .action(async (source: string, predicate: string, opts: { device?: string; timeout?: number | string; interval?: number; json?: boolean }) => {
+      if (source === 'state') {
+        const data = await client.request('wait-for-state', {
+          serial: opts.device,
+          predicate,
+          timeoutMs: opts.timeout,
+        })
+        emit(data, () => `condition met: ${predicate}`, jsonMode(opts), out)
+        return
+      }
+      if (source === 'event') {
+        const data = await client.request('wait-for-event', {
+          serial: opts.device,
+          name: predicate,
+          timeoutMs: opts.timeout,
+        })
+        emit(data, () => `event received: ${predicate}`, jsonMode(opts), out)
+        return
+      }
       if (source !== 'screen') {
         throw new AgentQaError(
           'E_BAD_ARGS',
-          `unknown wait-for source: ${source} (expected: screen; state and event are not implemented yet)`,
+          `unknown wait-for source: ${source} (expected screen, state, or event)`,
           { source },
         )
       }
