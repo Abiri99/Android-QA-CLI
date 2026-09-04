@@ -126,11 +126,13 @@ describe('main: daemon argument wiring', () => {
     })
   })
 
-  // Spec 9 also defines `wait-for state` and `wait-for event`. The source is an
-  // explicit argument so adding those later is not a breaking change to a
-  // command an agent has already learned.
-  it('wait-for rejects an unimplemented source instead of treating it as a predicate', async () => {
-    expect(await main(['wait-for', 'state', 'foo=bar', '--json'], out)).toBe(1)
+  // Spec 9 defines `wait-for screen`, `wait-for state` and `wait-for event`.
+  // The source is an explicit argument precisely so any other value is
+  // rejected up front rather than treated as a predicate; `state` and
+  // `event` now route to their own daemon commands (see
+  // test/cli/state-cli.test.ts), so this checks a genuinely unknown source.
+  it('wait-for rejects an unknown source instead of treating it as a predicate', async () => {
+    expect(await main(['wait-for', 'weather', 'foo=bar', '--json'], out)).toBe(1)
     expect(JSON.parse(lines[0]!)).toMatchObject({ error: 'E_BAD_ARGS' })
     expect(calls).toHaveLength(0)
   })
