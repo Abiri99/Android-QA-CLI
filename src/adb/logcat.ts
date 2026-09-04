@@ -10,7 +10,16 @@ export interface LogLine {
 const DEFAULT_LINES = 200
 
 // threadtime: "MM-DD HH:MM:SS.mmm  PID  TID L TAG: message"
-const THREADTIME_RE = /^\d{2}-\d{2} [\d:.]+\s+\d+\s+\d+\s+([VDIWEF])\s+(.*?)\s*:\s?(.*)$/
+//
+// The tag/message separator is colon-space, not just colon: Android's
+// threadtime writer always emits ": " between tag and message, and tags
+// never contain spaces. Splitting on the first bare colon would corrupt a
+// tag that itself contains one (e.g. "Tag:Sub: message" -> tag "Tag"); a
+// greedy tag match would instead swallow a colon out of the message (e.g.
+// "MyApp: error: failed" -> tag "MyApp: error"). Matching the first
+// colon-space (or a colon at end of line, for an empty message) gets both
+// right. `\s*` before the colon still absorbs the field's right-padding.
+const THREADTIME_RE = /^\d{2}-\d{2} [\d:.]+\s+\d+\s+\d+\s+([VDIWEF])\s+(.*?)\s*:(?: |$)(.*)$/
 
 export function parseLogLines(raw: string): LogLine[] {
   const out: LogLine[] = []

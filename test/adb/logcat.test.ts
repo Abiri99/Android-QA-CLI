@@ -56,6 +56,45 @@ describe('parseLogLines', () => {
     expect(lines).toHaveLength(1)
     expect(lines[0]).toMatchObject({ level: '?', tag: '', message: 'something unexpected' })
   })
+
+  describe('tag/message split on colon-space, not first colon', () => {
+    const HEADER = '10-04 12:00:01.123  1234  1234'
+
+    it('trims right-padding before the colon', () => {
+      expect(parseLogLines(`${HEADER} I MyApp   : started up`)[0]).toMatchObject({
+        tag: 'MyApp',
+        message: 'started up',
+      })
+    })
+
+    it('keeps a colon inside the tag when followed by another colon-space', () => {
+      expect(parseLogLines(`${HEADER} I Tag:Sub: message`)[0]).toMatchObject({
+        tag: 'Tag:Sub',
+        message: 'message',
+      })
+    })
+
+    it('does not swallow a colon in the message into the tag', () => {
+      expect(parseLogLines(`${HEADER} I MyApp: error: failed`)[0]).toMatchObject({
+        tag: 'MyApp',
+        message: 'error: failed',
+      })
+    })
+
+    it('parses an unpadded tag that fills the field', () => {
+      expect(parseLogLines(`${HEADER} I VeryLongTagNameNoPadding: hello`)[0]).toMatchObject({
+        tag: 'VeryLongTagNameNoPadding',
+        message: 'hello',
+      })
+    })
+
+    it('parses an empty message after trimEnd removes the trailing space', () => {
+      expect(parseLogLines(`${HEADER} I MyApp:`)[0]).toMatchObject({
+        tag: 'MyApp',
+        message: '',
+      })
+    })
+  })
 })
 
 describe('readLogs', () => {
@@ -73,6 +112,15 @@ describe('readLogs', () => {
 
   it('filters by substring after parsing, case-insensitively', async () => {
     const lines = await readLogs(stubAdb(RAW), 'emulator-5554', { grep: 'SLOW' })
+    expect(lines.map((l) => l.message)).toEqual(['slow frame'])
+  })
+
+  it('filters against the raw line, not just the compacted message', async () => {
+    // 1240 is the TID of the "slow frame" line — present only in `raw`,
+    // never in the compacted `message`. A grep implementation that only
+    // looked at `message` would find nothing here, so this pins the
+    // behaviour that `grep` searches `raw`.
+    const lines = await readLogs(stubAdb(RAW), 'emulator-5554', { grep: '1240' })
     expect(lines.map((l) => l.message)).toEqual(['slow frame'])
   })
 })
