@@ -40,6 +40,16 @@ describe('AdbDriver.screen', () => {
     expect(snap.elements).toHaveLength(4)
   })
 
+  it('strips the trailing confirmation line even when adb appends a trailing newline after it', async () => {
+    // Real captured stdout from `adb exec-out uiautomator dump /dev/tty` ends
+    // with a newline after the confirmation line, not right at the line's end.
+    const noisy = xml + '\nUI hierchary dumped to: /dev/tty\n'
+    const driver = new AdbDriver(stubAdb(noisy), 'emulator-5554')
+    const snap = await driver.screen({ full: true })
+    expect(snap.elements).toHaveLength(4)
+    expect(snap.raw).not.toContain('UI hierchary dumped to:')
+  })
+
   it('omits raw XML unless full is requested', async () => {
     const driver = new AdbDriver(stubAdb(xml), 'emulator-5554')
     expect((await driver.screen()).raw).toBeUndefined()

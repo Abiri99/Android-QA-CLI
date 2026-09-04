@@ -5,7 +5,12 @@ import { compact } from '../ui/compact.js'
 import type { Driver, DriverCapabilities, ScreenOpts, ScreenSnapshot } from './types.js'
 
 const NOT_IDLE = /could not get idle state/i
-const TRAILER = /\s*UI hierchary dumped to:.*$/i // Android's own spelling
+// Android's own spelling. Real captured stdout from
+// `adb exec-out uiautomator dump` ends with a newline *after* this line, which
+// a bare `.*$` (no `m`/`s` flags) cannot match — `.` never matches `\n` and
+// `$` needs the absolute end of string, so the match fails and the trailer
+// survives untouched. Match up to the newline (or end of string) explicitly.
+const TRAILER = /\s*UI hierchary dumped to:[^\n]*\s*$/i
 
 export class AdbDriver implements Driver {
   constructor(

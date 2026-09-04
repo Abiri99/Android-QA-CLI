@@ -44,4 +44,9 @@ export function registerCommands(
     const png = await drivers.get(device.serial).screenshot()
     return { serial: device.serial, pngBase64: png.toString('base64') }
   })
+
+  registry.register('shutdown', async () => {
+    setTimeout(() => process.exit(0), 50)
+    return { stopping: true }
+  })
 }
