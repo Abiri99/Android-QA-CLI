@@ -388,8 +388,10 @@ than infer that authentication succeeded (§7.5).
 Detection cost follows instrumentation: a `state` condition is evaluated
 daemon-side for nothing, while a `ui_any` condition costs a screen dump under
 `AdbDriver`. Gate checks therefore run after every mutating command when the
-conditions are state-based, and only on explicit check or on command failure
-when they require a dump.
+conditions are state-based, and only on explicit `auth check` or on command
+failure when they require a dump. `auth check` forces evaluation of every gate
+regardless of cost, and is what an agent calls when it suspects it is blocked
+but no command has failed yet.
 
 ### 7.3 Kinds, and who resolves them
 
@@ -567,9 +569,10 @@ token budget and easy to regress unnoticed.
 **Device-dependent behavior** gets a deliberately small integration suite
 against an emulator with a fixture app. Slow and flaky by nature; kept minimal.
 
-**Pre-implementation validation.** Before building §7, confirm against one real
-logged-in app that a `run-as` data-dir snapshot survives restore with auth
-intact. If it does not, `auth` reduces to `status` + `login` and snapshot is cut.
+**Pre-implementation validation.** Before building §7.7, confirm against one
+real logged-in app that a `run-as` data-dir snapshot survives restore with auth
+intact. If it does not, snapshot is cut and auth reduces to gates plus pausing
+on every run (§7.1–7.6), which remains usable.
 
 ## 12. Risks
 
