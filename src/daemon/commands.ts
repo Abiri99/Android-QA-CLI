@@ -11,7 +11,7 @@ import { readLogs, readCrashes } from '../adb/logcat.js'
 import { KEY_CODES } from '../driver/types.js'
 import type { KeyName } from '../driver/types.js'
 import { AgentQaError } from '../core/errors.js'
-import type { CaptureManager } from '../state/capture.js'
+import type { Capture, CaptureManager } from '../state/capture.js'
 import { parseStatePredicate, matchesState, resolveKey, readPath } from '../state/query.js'
 
 /**
@@ -109,6 +109,29 @@ function keyNameArg(args: Record<string, unknown>): KeyName {
     )
   }
   return name as KeyName
+}
+
+/**
+ * Returns an error when the device's capture stream has died, or null while it
+ * is healthy.
+ *
+ * A wait cannot distinguish "the condition is false" from "we stopped receiving
+ * lines" unless it asks. Reporting a blind wait as `E_TIMEOUT` is the failure
+ * spec 5.2 exists to prevent, one level up from a dropped log line: the agent
+ * reads a negative result where the truth is that we cannot see.
+ *
+ * `E_NOT_ATTACHED` rather than a code of its own, because the recovery is
+ * identical to never having attached — run `agentqa state attach`, which
+ * restarts a dead capture.
+ */
+function deadCaptureError(capture: Capture, serial: string): AgentQaError | null {
+  const stats = capture.stats()
+  if (stats.running) return null
+  return new AgentQaError(
+    'E_NOT_ATTACHED',
+    `the capture stream for ${serial} has stopped (adb exited with ${stats.lastExitCode ?? 'no code'}), so state stopped updating and this wait could not observe anything; run \`agentqa state attach\` to restart it`,
+    { serial, lastExitCode: stats.lastExitCode, running: false },
+  )
 }
 
 export function registerCommands(
@@ -373,10 +396,15 @@ export function registerCommands(
     const already = check()
     if (already) return { serial: device.serial, ...already }
 
+    // Fail fast rather than burning the whole timeout on a stream that will
+    // never deliver another line.
+    const deadOnEntry = deadCaptureError(capture, device.serial)
+    if (deadOnEntry) throw deadOnEntry
+
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         off()
-        reject(timeoutError())
+        reject(deadCaptureError(capture, device.serial) ?? timeoutError())
       }, timeoutMs)
       const off = capture.projection.onChange(() => {
         const hit = check()
@@ -425,14 +453,20 @@ export function registerCommands(
       }
     }
 
+    // Fail fast rather than burning the whole timeout on a stream that will
+    // never deliver another line.
+    const deadOnEntry = deadCaptureError(capture, device.serial)
+    if (deadOnEntry) throw deadOnEntry
+
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         off()
         reject(
-          new AgentQaError('E_TIMEOUT', `event ${name} did not arrive within ${timeoutMs}ms`, {
-            name,
-            timeoutMs,
-          }),
+          deadCaptureError(capture, device.serial) ??
+            new AgentQaError('E_TIMEOUT', `event ${name} did not arrive within ${timeoutMs}ms`, {
+              name,
+              timeoutMs,
+            }),
         )
       }, timeoutMs)
       const off = capture.projection.onEvent((e) => {

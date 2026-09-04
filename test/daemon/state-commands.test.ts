@@ -9,11 +9,14 @@ import type { AdbStream, AdbStreamer } from '../../src/adb/stream.js'
 
 class FakeStream implements AdbStream {
   private lineFns: ((l: string) => void)[] = []
+  private exitFns: ((c: number | null) => void)[] = []
   stopped = false
   onLine(fn: (l: string) => void): void { this.lineFns.push(fn) }
-  onExit(): void {}
+  onExit(fn: (c: number | null) => void): void { this.exitFns.push(fn) }
   stop(): void { this.stopped = true }
   emit(line: string): void { for (const f of this.lineFns) f(line) }
+  /** Simulates adb dying — device unplugged, `adb kill-server`, a crash. */
+  die(code: number | null = 1): void { for (const f of this.exitFns) f(code) }
 }
 
 class FakeStreamer implements AdbStreamer {
@@ -47,9 +50,10 @@ function build() {
   const call = (cmd: string, args: Record<string, unknown> = {}) =>
     registry.dispatch({ id: 'x', version: '0.1.0', cmd, args })
   const emit = (line: string) => streamer.streams[0]!.emit(line)
+  const die = (code: number | null = 1) => streamer.streams[0]!.die(code)
   const wire = (seq: number, kind: string, key: string, payload: string) =>
     `10-04 12:00:01.000  100  100 I AgentQA : AGENTQA|v1|${seq}|${kind}|${key}|1/1|${payload}`
-  return { call, emit, wire, streamer, captures }
+  return { call, emit, die, wire, streamer, captures }
 }
 
 describe('state-attach', () => {
@@ -309,5 +313,72 @@ describe('wait-for-event', () => {
     }
     expect(res).toMatchObject({ ok: true })
     expect(res.data.data).toEqual({ count: 2 })
+  })
+})
+
+
+describe('waits against a dead capture stream', () => {
+  // A wait cannot tell "the condition is false" from "we stopped receiving
+  // lines" unless it checks. Reporting a blind wait as a timeout is the
+  // failure spec 5.2 exists to prevent, one level up from a dropped line.
+
+  it('wait-for state rejects at once rather than waiting out the timeout', async () => {
+    const { call, die } = build()
+    await call('state-attach')
+    die(1)
+    const started = Date.now()
+    const res = await call('wait-for-state', { predicate: 'auth=true', timeoutMs: 5000 })
+    expect(res).toMatchObject({ ok: false, error: { error: 'E_NOT_ATTACHED' } })
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('wait-for state reports the capture died rather than E_TIMEOUT', async () => {
+    const { call, die } = build()
+    await call('state-attach')
+    const pending = call('wait-for-state', { predicate: 'auth=true', timeoutMs: 150 })
+    die(1)
+    expect(await pending).toMatchObject({ ok: false, error: { error: 'E_NOT_ATTACHED' } })
+  })
+
+  it('wait-for state still reports E_TIMEOUT while the stream is alive', async () => {
+    const { call } = build()
+    await call('state-attach')
+    expect(await call('wait-for-state', { predicate: 'auth=true', timeoutMs: 80 }))
+      .toMatchObject({ ok: false, error: { error: 'E_TIMEOUT' } })
+  })
+
+  it('wait-for event rejects at once rather than waiting out the timeout', async () => {
+    const { call, die } = build()
+    await call('state-attach')
+    die(1)
+    const started = Date.now()
+    const res = await call('wait-for-event', { name: 'checkout.success', timeoutMs: 5000 })
+    expect(res).toMatchObject({ ok: false, error: { error: 'E_NOT_ATTACHED' } })
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('wait-for event reports the capture died rather than E_TIMEOUT', async () => {
+    const { call, die } = build()
+    await call('state-attach')
+    const pending = call('wait-for-event', { name: 'checkout.success', timeoutMs: 150 })
+    die(1)
+    expect(await pending).toMatchObject({ ok: false, error: { error: 'E_NOT_ATTACHED' } })
+  })
+
+  it('wait-for event still reports E_TIMEOUT while the stream is alive', async () => {
+    const { call } = build()
+    await call('state-attach')
+    expect(await call('wait-for-event', { name: 'never', timeoutMs: 80 }))
+      .toMatchObject({ ok: false, error: { error: 'E_TIMEOUT' } })
+  })
+
+  it('names the exit code so an unplug is distinguishable from a kill-server', async () => {
+    const { call, die } = build()
+    await call('state-attach')
+    die(137)
+    const res = (await call('wait-for-state', { predicate: 'auth=true', timeoutMs: 500 })) as {
+      error: { details?: { lastExitCode?: number | null } }
+    }
+    expect(res.error.details?.lastExitCode).toBe(137)
   })
 })
