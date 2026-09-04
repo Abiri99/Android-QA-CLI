@@ -9,6 +9,11 @@ import type { Device } from '../adb/devices.js'
 import { AgentQaError, isAgentQaError } from '../core/errors.js'
 import { buildCli } from './index.js'
 import { emit, emitError, renderDevices } from './output.js'
+import { renderLogs } from '../adb/logcat.js'
+import type { LogLine } from '../adb/logcat.js'
+import { ExecAdbRunner, resolveAdbPath } from '../adb/runner.js'
+import { listDevices } from '../adb/devices.js'
+import { runChecks, renderChecks } from './doctor.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../../package.json') as { version: string }
@@ -133,6 +138,126 @@ export async function main(
       } else {
         throw new AgentQaError('E_BAD_ARGS', `unknown daemon action: ${action} (expected start or stop)`)
       }
+    })
+
+  program
+    .command('tap')
+    .description('tap an element or coordinate')
+    .argument('<target>', 'tag=NAME, text="...", desc="...", #N, or x,y')
+    .option('--device <serial>', 'target device serial')
+    .option('--duration <ms>', 'long-press duration in milliseconds', Number)
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (target: string, opts: { device?: string; duration?: number; json?: boolean }) => {
+      const data = await client.request('tap', {
+        serial: opts.device,
+        target,
+        durationMs: opts.duration,
+      })
+      emit(data, () => `tapped ${target}`, jsonMode(opts), out)
+    })
+
+  program
+    .command('type')
+    .description('type text into the focused field')
+    .argument('<text>', 'ASCII text to type')
+    .option('--device <serial>', 'target device serial')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (text: string, opts: { device?: string; json?: boolean }) => {
+      const data = await client.request('type', { serial: opts.device, text })
+      emit(data, () => `typed ${JSON.stringify(text)}`, jsonMode(opts), out)
+    })
+
+  program
+    .command('swipe')
+    .description('swipe between two targets or coordinates')
+    .argument('<from>', 'start: tag=NAME, #N, or x,y')
+    .argument('<to>', 'end: tag=NAME, #N, or x,y')
+    .option('--device <serial>', 'target device serial')
+    .option('--duration <ms>', 'swipe duration in milliseconds', Number)
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (from: string, to: string, opts: { device?: string; duration?: number; json?: boolean }) => {
+      const data = await client.request('swipe', {
+        serial: opts.device,
+        from,
+        to,
+        durationMs: opts.duration,
+      })
+      emit(data, () => `swiped ${from} -> ${to}`, jsonMode(opts), out)
+    })
+
+  program
+    .command('key')
+    .description('press a hardware or navigation key')
+    .argument('<name>', 'back, home, enter, tab, delete, up, down, left, right, menu, app_switch')
+    .option('--device <serial>', 'target device serial')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (name: string, opts: { device?: string; json?: boolean }) => {
+      const data = await client.request('key', { serial: opts.device, name })
+      emit(data, () => `pressed ${name}`, jsonMode(opts), out)
+    })
+
+  program
+    .command('wait-for')
+    .description('wait until a screen condition holds')
+    .argument('<predicate>', 'tag=NAME, text="...", or !tag=NAME to wait for absence')
+    .option('--device <serial>', 'target device serial')
+    .option('--timeout <ms>', 'give up after this long', Number)
+    .option('--interval <ms>', 'poll interval', Number)
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (predicate: string, opts: { device?: string; timeout?: number; interval?: number; json?: boolean }) => {
+      const data = (await client.request('wait-for', {
+        serial: opts.device,
+        predicate,
+        timeoutMs: opts.timeout,
+        intervalMs: opts.interval,
+      })) as { elements: ScreenElement[] }
+      emit(data, () => renderScreen(data.elements), jsonMode(opts), out)
+    })
+
+  program
+    .command('logs')
+    .description('read recent logcat output')
+    .option('--device <serial>', 'target device serial')
+    .option('--lines <n>', 'how many lines to read', Number)
+    .option('--grep <text>', 'only lines containing this text')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { device?: string; lines?: number; grep?: string; json?: boolean }) => {
+      const data = (await client.request('logs', {
+        serial: opts.device,
+        lines: opts.lines,
+        grep: opts.grep,
+      })) as { lines: LogLine[] }
+      emit(data, () => renderLogs(data.lines), jsonMode(opts), out)
+    })
+
+  program
+    .command('crashes')
+    .description('read the crash buffer')
+    .option('--device <serial>', 'target device serial')
+    .option('--lines <n>', 'how many lines to read', Number)
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { device?: string; lines?: number; json?: boolean }) => {
+      const data = (await client.request('crashes', {
+        serial: opts.device,
+        lines: opts.lines,
+      })) as { lines: LogLine[] }
+      emit(data, () => renderLogs(data.lines), jsonMode(opts), out)
+    })
+
+  program
+    .command('doctor')
+    .description('check that the environment is ready')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { json?: boolean }) => {
+      const adb = new ExecAdbRunner(resolveAdbPath())
+      const results = await runChecks({
+        adbPath: resolveAdbPath,
+        adbVersion: () => adb.text(['version']),
+        devices: () => listDevices(adb),
+        nodeVersion: () => process.version,
+      })
+      emit(results, () => renderChecks(results), jsonMode(opts), out)
+      if (results.some((r) => !r.ok)) exitCode = 1
     })
 
   try {
