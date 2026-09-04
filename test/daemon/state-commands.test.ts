@@ -106,6 +106,26 @@ describe('state-get', () => {
     const res = (await call('state-get', { key: 'a' })) as { data: { stale: boolean } }
     expect(res.data.stale).toBe(true)
   })
+
+  it('reports E_NO_MATCH naming the resolved key and missing path when the key resolves but the nested field does not', async () => {
+    const { call, emit, wire } = build()
+    await call('state-attach')
+    emit(wire(1, 'state', 'auth', '{"authenticated":true}'))
+    const res = await call('state-get', { key: 'auth.missingField' })
+    expect(res).toMatchObject({ ok: false, error: { error: 'E_NO_MATCH' } })
+    expect((res as { error: { details: { key: string; path: string[] } } }).error.details).toMatchObject({
+      key: 'auth',
+      path: ['missingField'],
+    })
+  })
+
+  it('returns successfully with value: null when the resolved field is a genuine null', async () => {
+    const { call, emit, wire } = build()
+    await call('state-attach')
+    emit(wire(1, 'state', 'auth', '{"authenticated":null}'))
+    const res = (await call('state-get', { key: 'auth.authenticated' })) as { data: { value: unknown } }
+    expect(res.data.value).toBeNull()
+  })
 })
 
 describe('state-list', () => {
@@ -187,5 +207,17 @@ describe('wait-for-event', () => {
     emit(wire(1, 'event', 'already', 'null'))
     expect(await call('wait-for-event', { name: 'already', timeoutMs: 200 }))
       .toMatchObject({ ok: true })
+  })
+
+  it('returns the most recent match when the event fired more than once before the wait started', async () => {
+    const { call, emit, wire } = build()
+    await call('state-attach')
+    emit(wire(1, 'event', 'cart.updated', '{"count":1}'))
+    emit(wire(2, 'event', 'cart.updated', '{"count":2}'))
+    const res = (await call('wait-for-event', { name: 'cart.updated', timeoutMs: 200 })) as {
+      data: { data: unknown }
+    }
+    expect(res).toMatchObject({ ok: true })
+    expect(res.data.data).toEqual({ count: 2 })
   })
 })

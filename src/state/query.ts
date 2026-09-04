@@ -23,11 +23,11 @@ export function parseStatePredicate(raw: string): StatePredicate {
   }
   const eq = trimmed.indexOf('=')
   if (eq === -1) return { key: trimmed, path: [], expected: undefined }
-  const key = trimmed.slice(0, eq)
+  const key = trimmed.slice(0, eq).trim()
   if (key.length === 0) {
     throw new AgentQaError('E_BAD_ARGS', `empty key in state predicate: ${raw}`, { predicate: raw })
   }
-  return { key, path: [], expected: coerce(trimmed.slice(eq + 1)) }
+  return { key, path: [], expected: coerce(trimmed.slice(eq + 1).trim()) }
 }
 
 export function readPath(value: unknown, path: string[]): unknown {

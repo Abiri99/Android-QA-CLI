@@ -38,6 +38,14 @@ describe('parseStatePredicate', () => {
     expect(parseStatePredicate('auth')).toEqual({ key: 'auth', path: [], expected: undefined })
   })
 
+  it('trims whitespace around the key and value', () => {
+    expect(parseStatePredicate('a = true')).toEqual({ key: 'a', path: [], expected: true })
+  })
+
+  it('trims whitespace around a bare key', () => {
+    expect(parseStatePredicate('  auth  ')).toEqual({ key: 'auth', path: [], expected: undefined })
+  })
+
   it('rejects an empty key', () => {
     expect(() => parseStatePredicate('=true')).toThrowError(/E_BAD_ARGS|empty/)
   })

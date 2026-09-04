@@ -249,6 +249,19 @@ export function registerCommands(
     }
     const { entry, path } = found
     const value = readPath(entry.value, path)
+    // A resolved key with no value at the nested path reads as `undefined`
+    // here (JSON has no `undefined`, so this cannot be a genuine stored
+    // value — a real `null` comes through as `null`, not `undefined`).
+    // Dropping the field silently (JSON.stringify elides `undefined`) would
+    // leave the agent with a response that has no `value` key at all and no
+    // signal why, indistinguishable from a legitimately absent value.
+    if (path.length > 0 && value === undefined) {
+      throw new AgentQaError(
+        'E_NO_MATCH',
+        `state key ${entry.key} has no field at ${path.join('.')}`,
+        { key: entry.key, path },
+      )
+    }
     return {
       serial: device.serial,
       key: entry.key,
@@ -318,8 +331,18 @@ export function registerCommands(
 
     // Check the ring first: an agent that acts and then waits for the event it
     // caused would otherwise always time out, since the event arrived during
-    // the round trip.
-    const seen = capture.projection.events().find((e) => e.name === name)
+    // the round trip. The ring is append-ordered oldest-first, so take the
+    // MOST RECENT match, not the first: the same event name can have fired
+    // earlier in the session (a repeated emission, or an earlier attempt at
+    // the same action), and resolving against that stale occurrence would
+    // report it as confirmation of an action that has not actually happened
+    // yet.
+    //
+    // This is still not a complete fix: findLast can return a match that
+    // predates the agent's own action, because nothing marks when the wait
+    // began. Closing that gap needs a `since` baseline — passed by the agent
+    // or captured by the daemon at dispatch — which this change does not add.
+    const seen = capture.projection.events().findLast((e) => e.name === name)
     if (seen) return { serial: device.serial, name, data: seen.data, seq: seen.seq }
 
     return new Promise((resolve, reject) => {
