@@ -25,6 +25,18 @@ export function parsePredicate(raw: string): Predicate {
       { target: raw },
     )
   }
+  // A coordinate is not a screen condition either, and it fails worse than a
+  // ref would: there is nothing to match, so an unnegated point predicate can
+  // only time out and a negated one (`!540,1200`) reports success instantly
+  // against any screen at all. A predicate must name something about the
+  // screen, so reject it at parse time.
+  if ('point' in target) {
+    throw new AgentQaError(
+      'E_BAD_ARGS',
+      `a coordinate cannot be used as a wait condition: ${body} (a predicate must name something about the screen — tag=, text= or desc=)`,
+      { target: raw },
+    )
+  }
   return { target, negated }
 }
 

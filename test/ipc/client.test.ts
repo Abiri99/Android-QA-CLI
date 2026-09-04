@@ -95,6 +95,50 @@ describe('DaemonClient', () => {
     }
   })
 
+  // `wait-for` is the first command that can legitimately outlive the client's
+  // own bound. When it did, the CLI reported `E_INTERNAL: daemon did not
+  // respond` at 60s while the daemon kept polling — an agent branching on
+  // `E_TIMEOUT` got `E_INTERNAL` instead. The client bound must be derived
+  // from the command's own timeout so the daemon's answer wins the race.
+  it('extends its bound past a command that carries its own timeout', async () => {
+    const registry = new CommandRegistry()
+    registry.register('wait-for', async () => {
+      await new Promise((r) => setTimeout(r, 120))
+      return { elements: [] }
+    })
+    const server = new DaemonServer(registry, '0.1.0')
+    const sock = tmpSocket()
+    await server.listen(sock)
+    try {
+      const client = new DaemonClient(sock, '0.1.0', 60)
+      await expect(
+        client.request('wait-for', { predicate: 'tag=x', timeoutMs: 5_000 }, { autostart: false }),
+      ).resolves.toEqual({ elements: [] })
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('keeps the standard bound for a command with no timeout of its own', async () => {
+    const registry = new CommandRegistry()
+    registry.register('screen', async () => {
+      await new Promise((r) => setTimeout(r, 120))
+      return { elements: [] }
+    })
+    const server = new DaemonServer(registry, '0.1.0')
+    const sock = tmpSocket()
+    await server.listen(sock)
+    try {
+      const client = new DaemonClient(sock, '0.1.0', 60)
+      await expect(client.request('screen', {}, { autostart: false })).rejects.toMatchObject({
+        code: 'E_INTERNAL',
+        message: /did not respond within 60ms/,
+      })
+    } finally {
+      await server.close()
+    }
+  })
+
   // Mirrors the daemon: a malformed line must not discard good messages that
   // decoded ahead of it in the same chunk.
   it('honours a response that decoded before a malformed line in the same chunk', async () => {

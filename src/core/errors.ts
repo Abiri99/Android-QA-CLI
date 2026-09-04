@@ -12,6 +12,7 @@ export type ErrorCode =
   | 'E_INTERNAL'
   | 'E_STALE_REF'
   | 'E_NO_MATCH'
+  | 'E_AMBIGUOUS_MATCH'
   | 'E_UNSUPPORTED_TEXT'
   | 'E_TIMEOUT'
 

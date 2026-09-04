@@ -92,19 +92,35 @@ export function registerCommands(
 
   registry.register('devices', async () => listDevices(adb))
 
-  // Resolves a target to a coordinate. A #N ref resolves against the CACHED
-  // snapshot — that is what a ref means. A tag/text/desc selector takes a fresh
-  // read, because it names something on the screen as it is now.
-  async function pointFor(serial: string, raw: string): Promise<Point> {
-    const target: Target = parseTarget(raw)
-    if ('point' in target) return target.point
-    if ('ref' in target) return centerOf(refs.resolve(serial, target.ref).bounds)
+  /**
+   * Resolves targets to coordinates. A `#N` ref resolves against the CACHED
+   * snapshot — that is what a ref means. A tag/text/desc selector names
+   * something on the screen as it is now, so it takes a fresh read.
+   *
+   * All the selectors in one command share ONE read. `swipe tag=a tag=b` used
+   * to take two, so a screen that reordered between them produced a swipe
+   * between elements from two different screens, reported as `ok: true`.
+   *
+   * That read is deliberately NOT recorded in the RefStore. `#N` is only safe
+   * while it denotes an element from output the agent actually read; recording
+   * a snapshot the agent never sees silently renumbers the namespace it is
+   * holding. Recording belongs where a snapshot is returned to the client —
+   * `screen` and `wait-for` — and nowhere else.
+   */
+  async function pointsFor(serial: string, raws: string[]): Promise<Point[]> {
+    const targets: Target[] = raws.map(parseTarget)
+    const needsRead = targets.some((t) => !('point' in t) && !('ref' in t))
+    const elements = needsRead ? (await drivers.get(serial).screen()).elements : []
+    return targets.map((target) => {
+      if ('point' in target) return target.point
+      if ('ref' in target) return centerOf(refs.resolve(serial, target.ref).bounds)
+      return centerOf(resolveOne(elements, target).bounds)
+    })
+  }
 
-    const snapshot = await drivers.get(serial).screen()
-    // Record it: the caller invalidates immediately after acting, but a failed
-    // resolution should still leave the agent with usable refs to inspect.
-    refs.record(serial, snapshot.elements)
-    return centerOf(resolveOne(snapshot.elements, target).bounds)
+  async function pointFor(serial: string, raw: string): Promise<Point> {
+    const [point] = await pointsFor(serial, [raw])
+    return point!
   }
 
   registry.register('screen', async (args) => {
@@ -139,8 +155,11 @@ export function registerCommands(
 
   registry.register('swipe', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
-    const from = await pointFor(device.serial, stringArg(args, 'from'))
-    const to = await pointFor(device.serial, stringArg(args, 'to'))
+    const [from, to] = await pointsFor(device.serial, [
+      stringArg(args, 'from'),
+      stringArg(args, 'to'),
+    ])
+    if (!from || !to) throw new AgentQaError('E_INTERNAL', 'swipe endpoints did not resolve')
     const durationMs = numberArg(args, 'durationMs') ?? 300
     try {
       await drivers.get(device.serial).swipe(from, to, durationMs)
@@ -162,8 +181,11 @@ export function registerCommands(
   })
 
   registry.register('wait-for', async (args) => {
-    const device = await selectDevice(adb, serialArg(args))
+    // Parsed before the device is selected: a malformed predicate is wrong no
+    // matter what is attached, and an agent that typed `!540,1200` is better
+    // served by being told that than by `E_NO_DEVICE`.
     const predicate = parsePredicate(stringArg(args, 'predicate'))
+    const device = await selectDevice(adb, serialArg(args))
     const elements = await pollUntil(
       async () => (await drivers.get(device.serial).screen()).elements,
       predicate,

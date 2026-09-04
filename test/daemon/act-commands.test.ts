@@ -5,6 +5,8 @@ import { RefStore } from '../../src/daemon/refs.js'
 import { FakeDriver } from '../../src/driver/fake-driver.js'
 import type { AdbRunner } from '../../src/adb/runner.js'
 import type { ScreenElement } from '../../src/ui/compact.js'
+import type { Driver, KeyName } from '../../src/driver/types.js'
+import type { Point } from '../../src/ui/target.js'
 
 function el(ref: string, over: Partial<ScreenElement> = {}): ScreenElement {
   return {
@@ -37,6 +39,87 @@ function build(elements: ScreenElement[] = [el('#1')]) {
     registry.dispatch({ id: 'x', version: '0.1.0', cmd, args })
   return { fake, refs, call }
 }
+
+/**
+ * A driver whose FIRST `screen()` returns one ordering and every later one
+ * returns another. Models the screen changing between reads, which is what
+ * makes an unseen intermediate read dangerous: refs renumber under the agent.
+ */
+function reordering(first: ScreenElement[], later: ScreenElement[]) {
+  const actions: string[] = []
+  let reads = 0
+  const driver: Driver = {
+    async screen() {
+      reads++
+      return { elements: reads === 1 ? first : later }
+    },
+    async screenshot() {
+      return Buffer.alloc(0)
+    },
+    capabilities() {
+      return { animationSafe: true, idleWaitConfigurable: true, elementRelativeTap: true }
+    },
+    async tap(point: Point) {
+      actions.push(`tap(${point.x},${point.y})`)
+    },
+    async swipe(from: Point, to: Point, durationMs = 300) {
+      actions.push(`swipe(${from.x},${from.y}->${to.x},${to.y},${durationMs})`)
+    },
+    async key(name: KeyName) {
+      actions.push(`key(${name})`)
+    },
+    async typeText(text: string) {
+      actions.push(`type(${text})`)
+    },
+  }
+  const refs = new RefStore()
+  const registry = new CommandRegistry()
+  registerCommands(registry, new DriverRegistry(adb, () => driver), adb, refs)
+  return {
+    actions,
+    refs,
+    readCount: () => reads,
+    call: (cmd: string, args: Record<string, unknown> = {}) =>
+      registry.dispatch({ id: 'x', version: '0.1.0', cmd, args }),
+  }
+}
+
+// `#N` is only safe while it denotes an element from output the agent actually
+// read. Resolving a selector used to take a fresh read AND record it, silently
+// renumbering the namespace the agent was holding — a wrong action reported as
+// `ok: true`.
+describe('selector resolution does not disturb the refs the agent holds', () => {
+  const A = el('#1', { testTag: 'a', bounds: { x1: 0, y1: 0, x2: 100, y2: 100 } })
+  const B = el('#2', { testTag: 'b', bounds: { x1: 500, y1: 500, x2: 700, y2: 700 } })
+  // The same two elements, in the other order: a real screen reorder renumbers
+  // refs without changing what is on screen.
+  const reversed = [{ ...B, ref: '#1' }, { ...A, ref: '#2' }]
+
+  it('resolves both swipe endpoints against one screen read', async () => {
+    const { actions, call, readCount } = reordering([A, B], reversed)
+    await call('screen') // read 1: the snapshot the agent was given, #1=A #2=B
+    const res = await call('swipe', { from: 'tag=b', to: '#1' })
+
+    expect(res).toMatchObject({ ok: true })
+    // #1 must still mean A (600,600 -> 50,50). Resolving `from` against a
+    // second, unseen read would have made #1 mean B and swiped B -> B.
+    expect(actions).toEqual(['swipe(600,600->50,50,300)'])
+    expect(readCount()).toBe(2) // the agent's `screen`, plus ONE for the selector
+  })
+
+  it('leaves refs pointing at the snapshot the agent saw after a failed selector', async () => {
+    const { actions, call } = reordering([A, B], reversed)
+    await call('screen')
+    const res = await call('tap', { target: 'tag=nope' })
+    expect(res).toMatchObject({ ok: false, error: { error: 'E_NO_MATCH' } })
+    expect(actions).toEqual([])
+
+    // #1 is A from the snapshot the agent read, not B from the failed
+    // resolution's intervening read.
+    await call('tap', { target: '#1' })
+    expect(actions).toEqual(['tap(50,50)'])
+  })
+})
 
 describe('tap', () => {
   it('taps the centre of an element resolved by tag', async () => {

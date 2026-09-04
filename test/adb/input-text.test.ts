@@ -22,6 +22,16 @@ describe('encodeInputText', () => {
     expect(encodeInputText('100%')).toBe('100\\%')
   })
 
+  // `input text` turns `%s` into a space after the device shell has run, so
+  // escaping the `%` does not survive: `type '100%sale'` would type `100 ale`.
+  // A bare `%` is fine (above); only this two-character sequence is refused.
+  it('refuses a literal %s rather than typing a space in its place', () => {
+    expect(() => encodeInputText('100%sale')).toThrowError(
+      expect.objectContaining({ code: 'E_UNSUPPORTED_TEXT' }),
+    )
+    expect(() => encodeInputText('100%sale')).toThrowError(/position 3/)
+  })
+
   it('escapes backslashes before anything else, so escapes are not doubled', () => {
     expect(encodeInputText('a\\b')).toBe('a\\\\b')
   })

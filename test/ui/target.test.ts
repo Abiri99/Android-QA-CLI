@@ -89,6 +89,18 @@ describe('resolveOne', () => {
     expect(() => resolveOne(elements, { text: 'Delete' })).toThrowError(/ambiguous|2 elements/)
   })
 
+  // Nothing-matched and several-matched call for opposite recoveries — wait or
+  // re-read, versus refine the selector — so they must not share one code in a
+  // tool whose whole premise is branching on the code rather than the prose.
+  it('distinguishes several-matched from nothing-matched by error code', () => {
+    expect(() => resolveOne(elements, { text: 'Archive' })).toThrowError(
+      expect.objectContaining({ code: 'E_NO_MATCH' }),
+    )
+    expect(() => resolveOne(elements, { text: 'Delete' })).toThrowError(
+      expect.objectContaining({ code: 'E_AMBIGUOUS_MATCH' }),
+    )
+  })
+
   it('names the candidate refs so the caller can disambiguate', () => {
     try {
       resolveOne(elements, { text: 'Delete' })
@@ -123,5 +135,50 @@ describe('centerOf', () => {
 
   it('floors fractional midpoints to integers, since adb takes integers', () => {
     expect(centerOf({ x1: 0, y1: 0, x2: 3, y2: 3 })).toEqual({ x: 1, y: 1 })
+  })
+})
+
+// A `tag=` miss on a screen where nothing at all exposes a test tag is nearly
+// always an app that has not enabled Compose's `testTagsAsResourceId`, not a
+// typo. Spec 4.3 requires the message to point at `agentqa init` rather than
+// leave the agent hunting for a tag that could never have been there.
+describe('resolveOne: un-onboarded app diagnosis', () => {
+  it('points at `agentqa init` when no element on screen has any test tag', () => {
+    const untagged = [el({ ref: '#1', text: 'Checkout' }), el({ ref: '#2', text: 'Cancel' })]
+    try {
+      resolveOne(untagged, { testTag: 'checkout_btn' })
+      throw new Error('should have thrown')
+    } catch (e) {
+      const err = e as { code?: string; message: string; details?: Record<string, unknown> }
+      expect(err.code).toBe('E_NO_MATCH')
+      expect(err.message).toMatch(/no element on screen exposes a test tag/)
+      expect(err.message).toMatch(/testTagsAsResourceId/)
+      expect(err.message).toMatch(/agentqa init/)
+      expect(err.details?.noTestTagsOnScreen).toBe(true)
+    }
+  })
+
+  it('keeps the plain message when other elements do have tags — the tag is just wrong', () => {
+    const tagged = [el({ ref: '#1', testTag: 'checkout_btn' }), el({ ref: '#2', text: 'Cancel' })]
+    try {
+      resolveOne(tagged, { testTag: 'nope' })
+      throw new Error('should have thrown')
+    } catch (e) {
+      const err = e as { code?: string; message: string }
+      expect(err.code).toBe('E_NO_MATCH')
+      expect(err.message).toBe('no element matched tag=nope')
+    }
+  })
+})
+
+describe('matchElements: exhaustiveness', () => {
+  // A point is not an element target (the type says so since it made
+  // `wait-for '!540,1200'` succeed against any screen). If a variant ever
+  // reaches here anyway, it must be loud rather than a silent empty match.
+  it('throws instead of returning [] for a target variant it cannot match', () => {
+    const bogus = { point: { x: 1, y: 2 } } as unknown as Parameters<typeof matchElements>[1]
+    expect(() => matchElements([el()], bogus)).toThrowError(
+      expect.objectContaining({ code: 'E_INTERNAL' }),
+    )
   })
 })

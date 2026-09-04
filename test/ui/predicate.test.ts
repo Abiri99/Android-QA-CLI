@@ -26,6 +26,22 @@ describe('parsePredicate', () => {
     })
   })
 
+  // A point predicate could never match: unnegated it can only time out, and
+  // negated (`!540,1200`) it reported success instantly against ANY screen —
+  // a false positive on a wait, which is the worst answer a wait can give.
+  it('rejects a coordinate as a wait condition', () => {
+    expect(() => parsePredicate('540,1200')).toThrowError(
+      expect.objectContaining({ code: 'E_BAD_ARGS' }),
+    )
+    expect(() => parsePredicate('540,1200')).toThrowError(/must name something about the screen/)
+  })
+
+  it('rejects a negated coordinate too, rather than succeeding instantly', () => {
+    expect(() => parsePredicate('!540,1200')).toThrowError(
+      expect.objectContaining({ code: 'E_BAD_ARGS' }),
+    )
+  })
+
   it('rejects a malformed predicate', () => {
     expect(() => parsePredicate('bogus')).toThrowError(/E_BAD_ARGS|unrecognized/)
   })

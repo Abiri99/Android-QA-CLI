@@ -198,13 +198,26 @@ export async function main(
 
   program
     .command('wait-for')
-    .description('wait until a screen condition holds')
+    .description('wait until a screen condition holds (polls the device, ~1-2s per attempt under the adb driver)')
+    // `screen` is explicit because spec 9 also defines `wait-for state` and
+    // `wait-for event` over the logcat projection. Shipping the bare form
+    // would make adding those a breaking change to a command agents already
+    // learned. Unlike this one, `wait-for state` will be event-driven and
+    // free — this form costs a screen read per attempt.
+    .argument('<source>', 'what to wait on (currently only: screen)')
     .argument('<predicate>', 'tag=NAME, text="...", or !tag=NAME to wait for absence')
     .option('--device <serial>', 'target device serial')
     .option('--timeout <ms>', 'give up after this long', Number)
     .option('--interval <ms>', 'poll interval', Number)
     .option('--json', 'emit machine-readable JSON')
-    .action(async (predicate: string, opts: { device?: string; timeout?: number; interval?: number; json?: boolean }) => {
+    .action(async (source: string, predicate: string, opts: { device?: string; timeout?: number; interval?: number; json?: boolean }) => {
+      if (source !== 'screen') {
+        throw new AgentQaError(
+          'E_BAD_ARGS',
+          `unknown wait-for source: ${source} (expected: screen; state and event are not implemented yet)`,
+          { source },
+        )
+      }
       const data = (await client.request('wait-for', {
         serial: opts.device,
         predicate,

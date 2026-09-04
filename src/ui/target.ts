@@ -22,8 +22,15 @@ export type Target =
  * lives in RefStore. Matching a ref against an arbitrary element list would
  * silently reintroduce the stale-ref mis-tap RefStore exists to prevent, so the
  * type makes that a compile error rather than a runtime surprise.
+ *
+ * `{ point }` is excluded for a different reason: a coordinate names a place on
+ * the screen, not an element, so there is nothing to search for. Letting one in
+ * used to mean `matchElements` quietly returned `[]` for it, which made
+ * `wait-for '!540,1200'` succeed instantly against any screen at all. The type
+ * now makes that a compile error, and the remaining branch is an exhaustiveness
+ * check rather than a silent fall-through.
  */
-export type ElementTarget = Exclude<Target, { ref: string }>
+export type ElementTarget = Exclude<Target, { ref: string } | { point: Point }>
 
 const POINT_RE = /^(-?\d+)\s*,\s*(-?\d+)$/
 
@@ -78,22 +85,42 @@ export function matchElements(elements: ScreenElement[], target: ElementTarget):
     if (exact.length > 0) return exact
     return elements.filter((e) => e.text.includes(target.text))
   }
-  // Only { point } remains once testTag/desc/text are ruled out. A point is a
-  // literal coordinate, not something to search elements for — there is
-  // nothing to match, so the result is always empty.
-  return []
+  // Nothing is left: testTag/desc/text exhaust ElementTarget. This branch only
+  // compiles while that stays true, so a new target variant is a type error
+  // here instead of a silent empty match at runtime.
+  const unhandled: never = target
+  throw new AgentQaError(
+    'E_INTERNAL',
+    `unhandled target variant: ${JSON.stringify(unhandled)}`,
+    { target: unhandled },
+  )
 }
 
 export function resolveOne(elements: ScreenElement[], target: ElementTarget): ScreenElement {
   const matches = matchElements(elements, target)
   if (matches.length === 0) {
+    // A `tag=` miss on a screen where *nothing* exposes a test tag is almost
+    // never a wrong tag name — it is a Compose app that has not turned on
+    // `testTagsAsResourceId`, so no tag reaches the accessibility tree at all.
+    // Reporting a bare "no element matched" there sends the agent hunting for
+    // a typo that does not exist (spec 4.3).
+    if ('testTag' in target && elements.every((e) => e.testTag === null)) {
+      throw new AgentQaError(
+        'E_NO_MATCH',
+        `no element matched ${describe(target)}, and no element on screen exposes a test tag at all — the app has probably not enabled Compose's \`testTagsAsResourceId\`; run \`agentqa init\` for the one-time app setup`,
+        { target: describe(target), noTestTagsOnScreen: true },
+      )
+    }
     throw new AgentQaError('E_NO_MATCH', `no element matched ${describe(target)}`, {
       target: describe(target),
     })
   }
   if (matches.length > 1) {
+    // Distinct from the zero-match case on purpose: nothing-matched means wait
+    // or re-read, several-matched means refine the selector. Opposite
+    // recoveries must not share one code in a tool that branches on the code.
     throw new AgentQaError(
-      'E_NO_MATCH',
+      'E_AMBIGUOUS_MATCH',
       `${describe(target)} is ambiguous — matched ${matches.length} elements; use a ref or a tag`,
       { target: describe(target), candidates: matches.map((m) => m.ref) },
     )

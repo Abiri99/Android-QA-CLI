@@ -26,6 +26,19 @@ export function encodeInputText(text: string): string {
         { index: i },
       )
     }
+    // `input text` substitutes `%s` -> space AFTER the device shell has run,
+    // so escaping the `%` (`\\%`) does not help: the shell strips the
+    // backslash and `input text` still sees `%s`. A literal `%s` is therefore
+    // indistinguishable from an encoded space, and `type '100%sale'` would
+    // type `100 ale`. A bare `%` is fine; only the two-character sequence is
+    // unrepresentable, so only that is refused.
+    if (text[i] === '%' && text[i + 1] === 's') {
+      throw new AgentQaError(
+        'E_UNSUPPORTED_TEXT',
+        `\`input text\` cannot type a literal "%s" (position ${i}): it encodes spaces as %s and cannot tell the two apart, so this text would be typed with a space instead`,
+        { index: i },
+      )
+    }
     if (code > 0x7e || code < 0x20) {
       throw new AgentQaError(
         'E_UNSUPPORTED_TEXT',
