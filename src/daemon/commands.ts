@@ -54,7 +54,20 @@ function stringArg(args: Record<string, unknown>, name: string): string {
 
 function numberArg(args: Record<string, unknown>, name: string): number | undefined {
   const value = args[name]
-  return typeof value === 'number' ? value : undefined
+  if (value === undefined) return undefined
+  if (typeof value !== 'number') {
+    throw new AgentQaError('E_BAD_ARGS', `argument must be a number: ${name}`, { argument: name })
+  }
+  return value
+}
+
+function stringOptArg(args: Record<string, unknown>, name: string): string | undefined {
+  const value = args[name]
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') {
+    throw new AgentQaError('E_BAD_ARGS', `argument must be a string: ${name}`, { argument: name })
+  }
+  return value
 }
 
 function keyNameArg(args: Record<string, unknown>): KeyName {
@@ -105,15 +118,22 @@ export function registerCommands(
     const device = await selectDevice(adb, serialArg(args))
     const point = await pointFor(device.serial, stringArg(args, 'target'))
     const durationMs = numberArg(args, 'durationMs')
-    await drivers.get(device.serial).tap(point, durationMs === undefined ? {} : { durationMs })
-    refs.invalidate(device.serial)
+    try {
+      await drivers.get(device.serial).tap(point, durationMs === undefined ? {} : { durationMs })
+    } finally {
+      refs.invalidate(device.serial)
+    }
     return { ok: true, serial: device.serial, point }
   })
 
   registry.register('type', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
-    await drivers.get(device.serial).typeText(stringArg(args, 'text'))
-    refs.invalidate(device.serial)
+    const text = stringArg(args, 'text')
+    try {
+      await drivers.get(device.serial).typeText(text)
+    } finally {
+      refs.invalidate(device.serial)
+    }
     return { ok: true, serial: device.serial }
   })
 
@@ -121,15 +141,23 @@ export function registerCommands(
     const device = await selectDevice(adb, serialArg(args))
     const from = await pointFor(device.serial, stringArg(args, 'from'))
     const to = await pointFor(device.serial, stringArg(args, 'to'))
-    await drivers.get(device.serial).swipe(from, to, numberArg(args, 'durationMs') ?? 300)
-    refs.invalidate(device.serial)
+    const durationMs = numberArg(args, 'durationMs') ?? 300
+    try {
+      await drivers.get(device.serial).swipe(from, to, durationMs)
+    } finally {
+      refs.invalidate(device.serial)
+    }
     return { ok: true, serial: device.serial, from, to }
   })
 
   registry.register('key', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
-    await drivers.get(device.serial).key(keyNameArg(args))
-    refs.invalidate(device.serial)
+    const name = keyNameArg(args)
+    try {
+      await drivers.get(device.serial).key(name)
+    } finally {
+      refs.invalidate(device.serial)
+    }
     return { ok: true, serial: device.serial }
   })
 
@@ -150,7 +178,7 @@ export function registerCommands(
 
   registry.register('logs', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
-    const grep = typeof args.grep === 'string' ? args.grep : undefined
+    const grep = stringOptArg(args, 'grep')
     const lines = await readLogs(adb, device.serial, {
       lines: numberArg(args, 'lines'),
       ...(grep === undefined ? {} : { grep }),

@@ -84,6 +84,33 @@ describe('tap', () => {
     const res = await call('tap', { target: 'tag=nope' })
     expect(res).toMatchObject({ ok: false, error: { error: 'E_NO_MATCH' } })
   })
+
+  it('invalidates refs even when the driver throws after the tap reached the device', async () => {
+    const { fake, call } = build()
+    await call('screen')
+    fake.failNext = new Error('adb: output parse failed after dispatching touch event')
+    const res = await call('tap', { target: '#1' })
+    expect(res).toMatchObject({ ok: false })
+    const after = await call('tap', { target: '#1' })
+    expect(after).toMatchObject({ ok: false, error: { error: 'E_STALE_REF' } })
+  })
+
+  it('does not invalidate refs when target resolution fails (no action reached the device)', async () => {
+    const { fake, call } = build()
+    await call('screen')
+    const res = await call('tap', { target: 'tag=nope' })
+    expect(res).toMatchObject({ ok: false, error: { error: 'E_NO_MATCH' } })
+    expect(fake.actions).toEqual([])
+    const after = await call('tap', { target: '#1' })
+    expect(after).toMatchObject({ ok: true })
+  })
+
+  it('rejects a wrong-typed durationMs with E_BAD_ARGS instead of silently dropping it', async () => {
+    const { fake, call } = build()
+    const res = await call('tap', { target: '10,20', durationMs: '800' })
+    expect(res).toMatchObject({ ok: false, error: { error: 'E_BAD_ARGS' } })
+    expect(fake.actions).toEqual([])
+  })
 })
 
 describe('screen', () => {
@@ -121,6 +148,36 @@ describe('type, swipe, key', () => {
     const res = await call('key', { name: 'zoom' })
     expect(res).toMatchObject({ ok: false, error: { error: 'E_BAD_ARGS' } })
   })
+
+  it('invalidates refs even when type throws after reaching the device', async () => {
+    const { fake, call } = build()
+    await call('screen')
+    fake.failNext = new Error('adb: broken pipe')
+    const res = await call('type', { text: 'hello' })
+    expect(res).toMatchObject({ ok: false })
+    const after = await call('tap', { target: '#1' })
+    expect(after).toMatchObject({ ok: false, error: { error: 'E_STALE_REF' } })
+  })
+
+  it('invalidates refs even when swipe throws after reaching the device', async () => {
+    const { fake, call } = build()
+    await call('screen')
+    fake.failNext = new Error('adb: broken pipe')
+    const res = await call('swipe', { from: '10,20', to: '30,40' })
+    expect(res).toMatchObject({ ok: false })
+    const after = await call('tap', { target: '#1' })
+    expect(after).toMatchObject({ ok: false, error: { error: 'E_STALE_REF' } })
+  })
+
+  it('invalidates refs even when key throws after reaching the device', async () => {
+    const { fake, call } = build()
+    await call('screen')
+    fake.failNext = new Error('adb: broken pipe')
+    const res = await call('key', { name: 'back' })
+    expect(res).toMatchObject({ ok: false })
+    const after = await call('tap', { target: '#1' })
+    expect(after).toMatchObject({ ok: false, error: { error: 'E_STALE_REF' } })
+  })
 })
 
 describe('wait-for', () => {
@@ -154,5 +211,11 @@ describe('logs and crashes', () => {
     const { call } = build()
     const res = (await call('crashes', {})) as { data: { lines: { message: string }[] } }
     expect(res.data.lines[0]?.message).toContain('FATAL EXCEPTION')
+  })
+
+  it('rejects a wrong-typed grep with E_BAD_ARGS instead of silently dropping it', async () => {
+    const { call } = build()
+    const res = await call('logs', { grep: 42 })
+    expect(res).toMatchObject({ ok: false, error: { error: 'E_BAD_ARGS' } })
   })
 })
