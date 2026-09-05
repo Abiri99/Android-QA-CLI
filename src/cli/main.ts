@@ -224,6 +224,29 @@ export async function main(
       emit(data, () => `pressed ${name}`, jsonMode(opts), out)
     })
 
+  program
+    .command('deeplink')
+    .description('open a deep link, so a flow can jump straight to a screen')
+    .argument('<uri>', 'the uri to open, for example example://cart')
+    .option('--device <serial>', 'target device serial')
+    .option('--application-id <id>', 'scope the intent to this package, avoiding the chooser')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
+    .option('--json', 'emit machine-readable JSON')
+    .action(
+      async (
+        uri: string,
+        opts: { device?: string; applicationId?: string; project?: string; json?: boolean },
+      ) => {
+        const data = (await client.request('deeplink', {
+          serial: opts.device,
+          uri,
+          applicationId: opts.applicationId,
+          projectRoot: optionalProjectRoot(opts.project),
+        })) as { uri: string }
+        emit(data, () => `opened ${data.uri}`, jsonMode(opts), out)
+      },
+    )
+
   const state = program
     .command('state')
     .description("read the app's internal state, captured from its logcat output")
@@ -486,19 +509,22 @@ export async function main(
     .option('--project <dir>', 'project directory containing agentqa.toml')
     .option('--timeout <duration>', 'give up after this long (5m, 30s, or milliseconds)', '5m')
     .option('--interval <ms>', 'how often to re-check', Number)
+    .option('--resume-to <where>', 'return to where the flow paused: checkpoint')
     .option('--json', 'emit machine-readable JSON')
-    .action(async (opts: { gate: string; device?: string; project?: string; timeout?: string; interval?: number; json?: boolean }) => {
+    .action(async (opts: { gate: string; device?: string; project?: string; timeout?: string; interval?: number; resumeTo?: string; json?: boolean }) => {
       const data = (await client.request('auth-wait', {
         serial: opts.device,
         projectRoot: projectRoot(opts.project),
         gate: opts.gate,
         timeout: opts.timeout,
         intervalMs: opts.interval,
-      })) as { gate: string; cleared: boolean; confirmed: boolean }
+        resumeTo: opts.resumeTo,
+      })) as { gate: string; cleared: boolean; confirmed: boolean; resumed?: string }
       emit(
         data,
         () =>
-          `gate ${data.gate} cleared (${data.confirmed ? 'confirmed by app state' : 'inferred from the screen'})`,
+          `gate ${data.gate} cleared (${data.confirmed ? 'confirmed by app state' : 'inferred from the screen'})` +
+          (data.resumed === undefined ? '' : `, resumed: ${data.resumed}`),
         jsonMode(opts),
         out,
       )

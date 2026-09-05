@@ -7,6 +7,8 @@ import type { ConfigRegistry } from '../config/registry.js'
 import type { Notifier } from '../auth/notify.js'
 import { GateTracker } from '../auth/tracker.js'
 import type { ProjectConfig } from '../config/types.js'
+import type { CheckpointStore } from '../auth/checkpoint.js'
+import { resolveKey, readPath } from '../state/query.js'
 
 export interface GuardDeps {
   drivers: DriverRegistry
@@ -14,6 +16,7 @@ export interface GuardDeps {
   captures: CaptureManager
   configs: ConfigRegistry
   tracker: GateTracker
+  checkpoints: CheckpointStore
   /** Built per project, since `auth.notify` is a per-project setting. */
   notifierFor: (config: ProjectConfig) => Notifier
 }
@@ -27,7 +30,7 @@ export interface GuardDeps {
  * its own rather than living as an inline closure only `startDaemon` can build.
  */
 export function createGateGuard(deps: GuardDeps): GateGuard {
-  const { drivers, adb, captures, configs, tracker, notifierFor } = deps
+  const { drivers, adb, captures, configs, tracker, checkpoints, notifierFor } = deps
   return async (serial, args) => {
     const projectRoot = typeof args.projectRoot === 'string' ? args.projectRoot : null
     // No project, no gates. A command run outside a configured project is not
@@ -37,7 +40,7 @@ export function createGateGuard(deps: GuardDeps): GateGuard {
     // `readScreen: false` — the guard runs around every mutating command, and a
     // dump before and after each one would multiply the cost of every action
     // (spec 7.2). UI-only gates are found by `auth check`, on demand.
-    const { gates } = await evaluateAll({ drivers, adb, captures, configs }, serial, projectRoot, false)
+    const { gates } = await evaluateAll({ drivers, adb, captures, configs, checkpoints }, serial, projectRoot, false)
 
     // Re-arm every gate we can see is closed, so a second login later in the
     // run notifies again. Only `no` re-arms: `unknown` is not evidence the gate
@@ -58,7 +61,7 @@ export function createGateGuard(deps: GuardDeps): GateGuard {
         // Re-evaluate rather than assuming the attempt worked: `emu finger
         // touch` succeeding means adb accepted the command, not that the app
         // accepted the fingerprint.
-        const after = await evaluateAll({ drivers, adb, captures, configs }, serial, projectRoot, false)
+        const after = await evaluateAll({ drivers, adb, captures, configs, checkpoints }, serial, projectRoot, false)
         const still = after.gates.find((g) => g.name === blocking.name)
         if (still && still.open !== 'yes') {
           tracker.clear(serial, blocking.name)
@@ -66,6 +69,25 @@ export function createGateGuard(deps: GuardDeps): GateGuard {
         }
       }
     }
+
+    // Automatic resolution has failed to clear it — this is the moment the
+    // guard actually decides to pause. Record where the flow was, so
+    // `--resume-to checkpoint` has somewhere to return to once a human clears
+    // it (spec 7.6). Read from the projection, which is already in memory;
+    // this must not add a screen dump on top of every blocked command.
+    const capture = captures.get(serial)
+    const screenEntry = capture ? resolveKey(capture.projection, 'screen.current') : undefined
+    const screen =
+      screenEntry && !screenEntry.entry.stale
+        ? String(readPath(screenEntry.entry.value, screenEntry.path) ?? '')
+        : null
+    checkpoints.record({
+      serial,
+      screen: screen && screen.length > 0 ? screen : null,
+      deeplink: null,
+      gate: blocking.name,
+      at: Date.now(),
+    })
 
     const notifier: Notifier = notifierFor(config)
     if (tracker.shouldNotify(serial, blocking.name)) {

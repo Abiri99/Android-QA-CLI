@@ -15,6 +15,7 @@ import type { Capture, CaptureManager } from '../state/capture.js'
 import { parseStatePredicate, matchesState, resolveKey, readPath } from '../state/query.js'
 import { authRequiredError } from '../auth/error.js'
 import type { GateReport } from './auth-commands.js'
+import type { CheckpointStore } from '../auth/checkpoint.js'
 
 /**
  * Returns the gate blocking this device, or null when nothing is.
@@ -171,6 +172,7 @@ export function registerCommands(
   refs: RefStore,
   captures: CaptureManager,
   guard?: GateGuard,
+  checkpoints?: CheckpointStore,
 ): void {
   /**
    * Runs before a mutating command acts. An open gate throws here, having done
@@ -303,6 +305,48 @@ export function registerCommands(
       refs.invalidate(device.serial)
     }
     return { ok: true, serial: device.serial, ...(await gateAfter(device.serial, args)) }
+  })
+
+  registry.register('deeplink', async (args) => {
+    const uri = stringArg(args, 'uri')
+    // `am start -d cart` starts nothing and reports success-shaped output. A
+    // uri with no scheme is a typo, and saying so beats a no-op that looks like
+    // a navigation.
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(uri)) {
+      throw new AgentQaError(
+        'E_BAD_ARGS',
+        `deep link uri needs a scheme: ${uri} (for example example://cart)`,
+        { uri },
+      )
+    }
+    const device = await selectDevice(adb, serialArg(args))
+    await requireNoGate(device.serial, args)
+    const applicationId = stringOptArg(args, 'applicationId')
+    const command = [
+      'shell',
+      'am',
+      'start',
+      '-a',
+      'android.intent.action.VIEW',
+      '-d',
+      uri,
+      // Without a package the system may show a chooser, which is not a screen
+      // the flow asked for and which every subsequent selector then misses.
+      ...(applicationId === undefined ? [] : ['-p', applicationId]),
+    ]
+    try {
+      const output = await adb.text(command, { serial: device.serial })
+      checkpoints?.noteDeeplink(device.serial, uri)
+      return {
+        ok: true,
+        serial: device.serial,
+        uri,
+        output: output.trim(),
+        ...(await gateAfter(device.serial, args)),
+      }
+    } finally {
+      refs.invalidate(device.serial)
+    }
   })
 
   registry.register('wait-for', async (args) => {

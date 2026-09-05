@@ -10,6 +10,7 @@ import { CaptureManager } from '../state/capture.js'
 import { ConfigRegistry } from '../config/registry.js'
 import { MacNotifier, NullNotifier } from '../auth/notify.js'
 import { GateTracker } from '../auth/tracker.js'
+import { CheckpointStore } from '../auth/checkpoint.js'
 
 export async function startDaemon(version: string): Promise<DaemonServer> {
   ensureHome()
@@ -19,16 +20,18 @@ export async function startDaemon(version: string): Promise<DaemonServer> {
   const drivers = new DriverRegistry(adb)
   const configs = new ConfigRegistry()
   const tracker = new GateTracker()
+  const checkpoints = new CheckpointStore()
   const guard = createGateGuard({
     drivers,
     adb,
     captures,
     configs,
     tracker,
+    checkpoints,
     notifierFor: (config) => (config.notify ? new MacNotifier() : new NullNotifier()),
   })
-  registerCommands(registry, drivers, adb, new RefStore(), captures, guard)
-  registerAuthCommands(registry, { drivers, adb, captures, configs })
+  registerCommands(registry, drivers, adb, new RefStore(), captures, guard, checkpoints)
+  registerAuthCommands(registry, { drivers, adb, captures, configs, checkpoints })
   const server = new DaemonServer(registry, version)
   await server.listen(daemonSocketPath())
   return server

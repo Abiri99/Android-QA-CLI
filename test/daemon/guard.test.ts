@@ -4,6 +4,7 @@ import { createGateGuard } from '../../src/daemon/guard.js'
 import { ConfigRegistry } from '../../src/config/registry.js'
 import { CaptureManager } from '../../src/state/capture.js'
 import { GateTracker } from '../../src/auth/tracker.js'
+import { CheckpointStore } from '../../src/auth/checkpoint.js'
 import { FakeDriver } from '../../src/driver/fake-driver.js'
 import { FakeStreamer } from '../helpers/fake-stream.js'
 import type { AdbRunner } from '../../src/adb/runner.js'
@@ -93,6 +94,7 @@ function build(notify: boolean, notifier: Notifier = new RecordingNotifier()) {
     load: () => projectConfig(notify),
   })
   const tracker = new GateTracker()
+  const checkpoints = new CheckpointStore()
   // Mirrors the real `notifierFor` in `startDaemon`: it is per-project config
   // that decides whether a notifier fires at all, so the fake must consult
   // `config.notify` too, not just hand back the same notifier unconditionally.
@@ -102,9 +104,10 @@ function build(notify: boolean, notifier: Notifier = new RecordingNotifier()) {
     captures,
     configs,
     tracker,
+    checkpoints,
     notifierFor: (config) => (config.notify ? notifier : new NoopNotifier()),
   })
-  return { guard, captures }
+  return { guard, captures, checkpoints }
 }
 
 /**
@@ -138,15 +141,17 @@ function buildBiometric(onEmuTouch: (captures: CaptureManager) => void) {
     load: () => biometricConfig(true),
   })
   const tracker = new GateTracker()
+  const checkpoints = new CheckpointStore()
   const guard = createGateGuard({
     drivers,
     adb,
     captures,
     configs,
     tracker,
+    checkpoints,
     notifierFor: () => notifier,
   })
-  return { guard, captures, notifier, emuCalls }
+  return { guard, captures, notifier, emuCalls, checkpoints }
 }
 
 function setAuthenticated(captures: CaptureManager, value: boolean): void {
@@ -269,5 +274,44 @@ describe('createGateGuard', () => {
     expect(blocking?.name).toBe('unlock')
     expect(emuCalls).toEqual([['emu', 'finger', 'touch', '1']])
     expect(notifier.calls.length).toBe(1)
+  })
+
+  it('records a checkpoint naming the blocking gate when it decides to pause', async () => {
+    const { guard, captures, checkpoints } = build(true)
+    setAuthenticated(captures, false)
+    await guard(SERIAL, { projectRoot: '/p' })
+    const cp = checkpoints.get(SERIAL)
+    expect(cp?.gate).toBe('login')
+    expect(cp?.deeplink).toBeNull()
+  })
+
+  it('records the current screen name in the checkpoint, when the projection has one', async () => {
+    const { guard, captures, checkpoints } = build(true)
+    setAuthenticated(captures, false)
+    const capture = captures.attach(SERIAL)
+    capture.projection.apply({
+      kind: 'state',
+      key: 'screen',
+      payload: JSON.stringify({ current: 'Cart' }),
+      seq: 2,
+    })
+    await guard(SERIAL, { projectRoot: '/p' })
+    expect(checkpoints.get(SERIAL)?.screen).toBe('Cart')
+  })
+
+  it('records a null screen when the projection has no screen key', async () => {
+    const { guard, captures, checkpoints } = build(true)
+    setAuthenticated(captures, false)
+    await guard(SERIAL, { projectRoot: '/p' })
+    expect(checkpoints.get(SERIAL)?.screen).toBeNull()
+  })
+
+  it('does not record a checkpoint when an automatic attempt closes the gate', async () => {
+    const { guard, captures, checkpoints } = buildBiometric((caps) => {
+      setAuthenticated(caps, true)
+    })
+    setAuthenticated(captures, false)
+    await guard(SERIAL, { projectRoot: '/p' })
+    expect(checkpoints.get(SERIAL)).toBeUndefined()
   })
 })

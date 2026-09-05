@@ -8,6 +8,7 @@ import { FakeDriver } from '../../src/driver/fake-driver.js'
 import { FakeStreamer } from '../helpers/fake-stream.js'
 import { callFor } from '../helpers/call.js'
 import { isAgentQaError } from '../../src/core/errors.js'
+import { CheckpointStore } from '../../src/auth/checkpoint.js'
 import type { AdbRunner } from '../../src/adb/runner.js'
 import type { GateConfig, ProjectConfig } from '../../src/config/types.js'
 import type { ScreenElement } from '../../src/ui/compact.js'
@@ -21,10 +22,11 @@ function element(text: string): ScreenElement {
   }
 }
 
-function fakeAdb(): AdbRunner {
+function fakeAdb(calls: string[][] = []): AdbRunner {
   return {
     async text(args) {
       if (args[0] === 'devices') return `List of devices attached\n${SERIAL}\tdevice\n`
+      calls.push(args)
       return ''
     },
     async binary() { return Buffer.alloc(0) },
@@ -33,7 +35,8 @@ function fakeAdb(): AdbRunner {
 
 function build(gates: GateConfig[], screen: ScreenElement[] = []) {
   const registry = new CommandRegistry()
-  const adb = fakeAdb()
+  const calls: string[][] = []
+  const adb = fakeAdb(calls)
   const driver = new FakeDriver({ elements: screen })
   const drivers = new DriverRegistry(adb, () => driver)
   const captures = new CaptureManager(new FakeStreamer())
@@ -42,8 +45,9 @@ function build(gates: GateConfig[], screen: ScreenElement[] = []) {
     activeBuildTypes: ['debug'], strategy: 'manual', notify: false, traceEnabled: false, gates,
   }
   const configs = new ConfigRegistry({ find: () => '/p/agentqa.toml', stat: () => 1, load: () => config })
-  registerAuthCommands(registry, { drivers, adb, captures, configs })
-  return { call: callFor(registry), captures, driver }
+  const checkpoints = new CheckpointStore()
+  registerAuthCommands(registry, { drivers, adb, captures, configs, checkpoints })
+  return { call: callFor(registry), captures, driver, calls, checkpoints }
 }
 
 const LOGIN: GateConfig = {
@@ -203,5 +207,61 @@ describe('auth-wait', () => {
       expect(e.details?.captureDead).toBe(true)
       expect(e.message).toContain('could not be observed')
     }
+  })
+
+  describe('--resume-to checkpoint', () => {
+    it('replays the checkpointed deep link and reports resumed: deeplink', async () => {
+      const { call, captures, calls, checkpoints } = build([LOGIN])
+      const capture = captures.attach(SERIAL)
+      capture.projection.apply({ kind: 'state', key: 'auth', payload: '{"authenticated":true}', seq: 1 })
+      checkpoints.record({
+        serial: SERIAL, screen: 'Checkout', deeplink: 'example://checkout', gate: 'login', at: 1,
+      })
+      const result = (await call('auth-wait', {
+        projectRoot: '/p', gate: 'login', timeout: '5m', resumeTo: 'checkpoint',
+      })) as { cleared: boolean; resumed: string; checkpoint?: { deeplink: string | null } }
+      expect(result.cleared).toBe(true)
+      expect(result.resumed).toBe('deeplink')
+      expect(result.checkpoint?.deeplink).toBe('example://checkout')
+      const replay = calls.find((a) => a.includes('example://checkout'))
+      expect(replay).toBeTruthy()
+      expect(replay).toContain('android.intent.action.VIEW')
+    })
+
+    it('reports resumed: none and calls no adb command when the checkpoint has no deep link', async () => {
+      const { call, captures, calls, checkpoints } = build([LOGIN])
+      const capture = captures.attach(SERIAL)
+      capture.projection.apply({ kind: 'state', key: 'auth', payload: '{"authenticated":true}', seq: 1 })
+      checkpoints.record({ serial: SERIAL, screen: 'Cart', deeplink: null, gate: 'login', at: 1 })
+      const result = (await call('auth-wait', {
+        projectRoot: '/p', gate: 'login', timeout: '5m', resumeTo: 'checkpoint',
+      })) as { cleared: boolean; resumed: string }
+      expect(result.cleared).toBe(true)
+      expect(result.resumed).toBe('none')
+      expect(calls.length).toBe(0)
+    })
+
+    it('reports resumed: no-checkpoint when nothing was ever recorded', async () => {
+      const { call, captures } = build([LOGIN])
+      const capture = captures.attach(SERIAL)
+      capture.projection.apply({ kind: 'state', key: 'auth', payload: '{"authenticated":true}', seq: 1 })
+      const result = (await call('auth-wait', {
+        projectRoot: '/p', gate: 'login', timeout: '5m', resumeTo: 'checkpoint',
+      })) as { cleared: boolean; resumed: string }
+      expect(result.cleared).toBe(true)
+      expect(result.resumed).toBe('no-checkpoint')
+    })
+
+    it('rejects a --resume-to value other than checkpoint, naming the accepted value', async () => {
+      const { call } = build([LOGIN])
+      try {
+        await call('auth-wait', { projectRoot: '/p', gate: 'login', timeout: '5m', resumeTo: 'wat' })
+        throw new Error('expected auth-wait to throw')
+      } catch (e) {
+        if (!isAgentQaError(e)) throw e
+        expect(e.code).toBe('E_BAD_ARGS')
+        expect(e.message).toContain('checkpoint')
+      }
+    })
   })
 })

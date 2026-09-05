@@ -12,12 +12,14 @@ import type { EvalContext, GateStatus } from '../auth/evaluate.js'
 import { needsScreen, hasState } from '../auth/gate.js'
 import type { Gate } from '../auth/gate.js'
 import { isEmulator } from '../auth/auto.js'
+import type { CheckpointStore } from '../auth/checkpoint.js'
 
 export interface AuthDeps {
   drivers: DriverRegistry
   adb: AdbRunner
   captures: CaptureManager
   configs: ConfigRegistry
+  checkpoints: CheckpointStore
 }
 
 function projectRootArg(args: Record<string, unknown>): string {
@@ -56,6 +58,24 @@ function gateArg(gates: Gate[], args: Record<string, unknown>): Gate {
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * The only accepted value today is `checkpoint`. Silently ignoring anything
+ * else would tell an agent that typoed `--resume-to checkpiont` that its
+ * request succeeded, when nothing it asked for happened.
+ */
+function resumeToArg(args: Record<string, unknown>): 'checkpoint' | undefined {
+  const value = args.resumeTo
+  if (value === undefined) return undefined
+  if (value !== 'checkpoint') {
+    throw new AgentQaError(
+      'E_BAD_ARGS',
+      `unknown --resume-to value: ${JSON.stringify(value)} (expected: checkpoint)`,
+      { argument: 'resumeTo', value },
+    )
+  }
+  return value
+}
 
 /**
  * Builds the evidence a gate evaluation runs against.
@@ -154,6 +174,7 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
     const gate = gateArg(gates, args)
     const timeoutMs = parseDuration(args.timeout, DEFAULT_WAIT_MS)
     const intervalMs = typeof args.intervalMs === 'number' ? args.intervalMs : 1_000
+    const resumeTo = resumeToArg(args)
     const device = await selectDevice(deps.adb, serialArg(args))
 
     // A gate with no `until` cannot be waited on. Blocking for five minutes and
@@ -197,6 +218,32 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
           // showing the login button may have changed for unrelated reasons.
           confirmed: basis === 'state',
           basis,
+        }
+        // After the gate clears. Authentication often lands the app somewhere
+        // unrelated, so returning to where the flow paused is the difference
+        // between resuming and starting over.
+        if (resumeTo === 'checkpoint') {
+          const cp = deps.checkpoints.get(device.serial)
+          if (cp?.deeplink) {
+            const config = deps.configs.forRoot(projectRoot)
+            await deps.adb.text(
+              [
+                'shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', cp.deeplink,
+                ...(config.applicationId === undefined ? [] : ['-p', config.applicationId]),
+              ],
+              { serial: device.serial },
+            )
+            return { ...cleared, resumed: 'deeplink', checkpoint: cp }
+          }
+          // No deep link to replay. Say what the checkpoint was and that we did
+          // not navigate, rather than claiming a resume that did not happen —
+          // an agent that believes it is back on the checkout screen will tap
+          // the wrong things.
+          return {
+            ...cleared,
+            resumed: cp ? 'none' : 'no-checkpoint',
+            ...(cp === undefined ? {} : { checkpoint: cp }),
+          }
         }
         return cleared
       }

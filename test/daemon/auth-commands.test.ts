@@ -8,6 +8,7 @@ import { FakeDriver } from '../../src/driver/fake-driver.js'
 import { FakeStreamer } from '../helpers/fake-stream.js'
 import { callFor } from '../helpers/call.js'
 import { isAgentQaError } from '../../src/core/errors.js'
+import { CheckpointStore } from '../../src/auth/checkpoint.js'
 import type { AdbRunner } from '../../src/adb/runner.js'
 import type { ProjectConfig } from '../../src/config/types.js'
 import type { ScreenElement } from '../../src/ui/compact.js'
@@ -79,7 +80,7 @@ function build(gates: ProjectConfig['gates'], screen: ScreenElement[]) {
     stat: () => 1,
     load: () => projectConfig(gates),
   })
-  registerAuthCommands(registry, { drivers, adb, captures, configs })
+  registerAuthCommands(registry, { drivers, adb, captures, configs, checkpoints: new CheckpointStore() })
   return { call: callFor(registry), driver, captures }
 }
 
@@ -178,6 +179,7 @@ describe('auth-check', () => {
       adb,
       captures: new CaptureManager(new FakeStreamer()),
       configs,
+      checkpoints: new CheckpointStore(),
     })
     const call = callFor(registry)
     try {
