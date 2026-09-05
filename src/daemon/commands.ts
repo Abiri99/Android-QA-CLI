@@ -13,6 +13,20 @@ import type { KeyName } from '../driver/types.js'
 import { AgentQaError } from '../core/errors.js'
 import type { Capture, CaptureManager } from '../state/capture.js'
 import { parseStatePredicate, matchesState, resolveKey, readPath } from '../state/query.js'
+import { authRequiredError } from '../auth/error.js'
+import type { GateReport } from './auth-commands.js'
+
+/**
+ * Returns the gate blocking this device, or null when nothing is.
+ *
+ * A function rather than the `AuthDeps` bundle so the command layer stays
+ * testable without a config file, and so the daemon can leave it unset for a
+ * project that declares no gates.
+ */
+export type GateGuard = (
+  serial: string,
+  args: Record<string, unknown>,
+) => Promise<GateReport | null>
 
 /**
  * Builds the driver for one device serial. This is the seam the spec's
@@ -156,7 +170,45 @@ export function registerCommands(
   adb: AdbRunner,
   refs: RefStore,
   captures: CaptureManager,
+  guard?: GateGuard,
 ): void {
+  /**
+   * Runs before a mutating command acts. An open gate throws here, having done
+   * nothing, which is what makes the documented agent handling — relay, wait,
+   * retry (spec 9) — safe: the retry is the first attempt, not the second.
+   */
+  async function requireNoGate(serial: string, args: Record<string, unknown>): Promise<void> {
+    if (!guard) return
+    const blocking = await guard(serial, args)
+    if (!blocking) return
+    throw authRequiredError(blocking, { serial })
+  }
+
+  /**
+   * Runs after a mutating command has acted, and deliberately never throws.
+   *
+   * The action already reached the device. Turning a newly-opened gate into an
+   * error would tell the agent the tap failed when it landed, and the
+   * prescribed retry would tap twice. Report it alongside the success instead;
+   * the agent's next command hits `requireNoGate` and fails fast there, having
+   * done nothing.
+   *
+   * A guard that throws is swallowed for the same reason: a config file deleted
+   * mid-flow must not retroactively fail an action that happened.
+   */
+  async function gateAfter(
+    serial: string,
+    args: Record<string, unknown>,
+  ): Promise<{ authGate?: GateReport }> {
+    if (!guard) return {}
+    try {
+      const blocking = await guard(serial, args)
+      return blocking ? { authGate: blocking } : {}
+    } catch {
+      return {}
+    }
+  }
+
   registry.register('ping', async () => ({ ok: true }))
 
   registry.register('devices', async () => listDevices(adb))
@@ -201,6 +253,7 @@ export function registerCommands(
 
   registry.register('tap', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
+    await requireNoGate(device.serial, args)
     const point = await pointFor(device.serial, stringArg(args, 'target'))
     const durationMs = numberArg(args, 'durationMs')
     try {
@@ -208,22 +261,24 @@ export function registerCommands(
     } finally {
       refs.invalidate(device.serial)
     }
-    return { ok: true, serial: device.serial, point }
+    return { ok: true, serial: device.serial, point, ...(await gateAfter(device.serial, args)) }
   })
 
   registry.register('type', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
+    await requireNoGate(device.serial, args)
     const text = stringArg(args, 'text')
     try {
       await drivers.get(device.serial).typeText(text)
     } finally {
       refs.invalidate(device.serial)
     }
-    return { ok: true, serial: device.serial }
+    return { ok: true, serial: device.serial, ...(await gateAfter(device.serial, args)) }
   })
 
   registry.register('swipe', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
+    await requireNoGate(device.serial, args)
     const [from, to] = await pointsFor(device.serial, [
       stringArg(args, 'from'),
       stringArg(args, 'to'),
@@ -235,18 +290,19 @@ export function registerCommands(
     } finally {
       refs.invalidate(device.serial)
     }
-    return { ok: true, serial: device.serial, from, to }
+    return { ok: true, serial: device.serial, from, to, ...(await gateAfter(device.serial, args)) }
   })
 
   registry.register('key', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
+    await requireNoGate(device.serial, args)
     const name = keyNameArg(args)
     try {
       await drivers.get(device.serial).key(name)
     } finally {
       refs.invalidate(device.serial)
     }
-    return { ok: true, serial: device.serial }
+    return { ok: true, serial: device.serial, ...(await gateAfter(device.serial, args)) }
   })
 
   registry.register('wait-for', async (args) => {

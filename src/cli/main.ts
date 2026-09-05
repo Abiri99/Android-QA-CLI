@@ -149,24 +149,36 @@ export async function main(
     .argument('<target>', 'tag=NAME, text="...", desc="...", #N, or x,y')
     .option('--device <serial>', 'target device serial')
     .option('--duration <ms>', 'long-press duration in milliseconds', Number)
+    .option('--project <dir>', 'project directory containing agentqa.toml')
     .option('--json', 'emit machine-readable JSON')
-    .action(async (target: string, opts: { device?: string; duration?: number; json?: boolean }) => {
-      const data = await client.request('tap', {
-        serial: opts.device,
-        target,
-        durationMs: opts.duration,
-      })
-      emit(data, () => `tapped ${target}`, jsonMode(opts), out)
-    })
+    .action(
+      async (
+        target: string,
+        opts: { device?: string; duration?: number; project?: string; json?: boolean },
+      ) => {
+        const data = await client.request('tap', {
+          serial: opts.device,
+          target,
+          durationMs: opts.duration,
+          projectRoot: optionalProjectRoot(opts.project),
+        })
+        emit(data, () => `tapped ${target}`, jsonMode(opts), out)
+      },
+    )
 
   program
     .command('type')
     .description('type text into the focused field')
     .argument('<text>', 'ASCII text to type')
     .option('--device <serial>', 'target device serial')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
     .option('--json', 'emit machine-readable JSON')
-    .action(async (text: string, opts: { device?: string; json?: boolean }) => {
-      const data = await client.request('type', { serial: opts.device, text })
+    .action(async (text: string, opts: { device?: string; project?: string; json?: boolean }) => {
+      const data = await client.request('type', {
+        serial: opts.device,
+        text,
+        projectRoot: optionalProjectRoot(opts.project),
+      })
       emit(data, () => `typed ${JSON.stringify(text)}`, jsonMode(opts), out)
     })
 
@@ -177,25 +189,38 @@ export async function main(
     .argument('<to>', 'end: tag=NAME, #N, or x,y')
     .option('--device <serial>', 'target device serial')
     .option('--duration <ms>', 'swipe duration in milliseconds', Number)
+    .option('--project <dir>', 'project directory containing agentqa.toml')
     .option('--json', 'emit machine-readable JSON')
-    .action(async (from: string, to: string, opts: { device?: string; duration?: number; json?: boolean }) => {
-      const data = await client.request('swipe', {
-        serial: opts.device,
-        from,
-        to,
-        durationMs: opts.duration,
-      })
-      emit(data, () => `swiped ${from} -> ${to}`, jsonMode(opts), out)
-    })
+    .action(
+      async (
+        from: string,
+        to: string,
+        opts: { device?: string; duration?: number; project?: string; json?: boolean },
+      ) => {
+        const data = await client.request('swipe', {
+          serial: opts.device,
+          from,
+          to,
+          durationMs: opts.duration,
+          projectRoot: optionalProjectRoot(opts.project),
+        })
+        emit(data, () => `swiped ${from} -> ${to}`, jsonMode(opts), out)
+      },
+    )
 
   program
     .command('key')
     .description('press a hardware or navigation key')
     .argument('<name>', 'back, home, enter, tab, delete, up, down, left, right, menu, app_switch')
     .option('--device <serial>', 'target device serial')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
     .option('--json', 'emit machine-readable JSON')
-    .action(async (name: string, opts: { device?: string; json?: boolean }) => {
-      const data = await client.request('key', { serial: opts.device, name })
+    .action(async (name: string, opts: { device?: string; project?: string; json?: boolean }) => {
+      const data = await client.request('key', {
+        serial: opts.device,
+        name,
+        projectRoot: optionalProjectRoot(opts.project),
+      })
       emit(data, () => `pressed ${name}`, jsonMode(opts), out)
     })
 
@@ -398,6 +423,15 @@ export async function main(
       )
     }
     return dirname(found)
+  }
+
+  // The mutating commands (tap/type/swipe/key) send projectRoot too, so the
+  // daemon can gate them — but outside a project they must still work, so
+  // unlike `projectRoot` above, finding nothing is not an error.
+  const optionalProjectRoot = (explicit?: string): string | undefined => {
+    if (explicit) return explicit
+    const found = findConfig(process.cwd())
+    return found ? dirname(found) : undefined
   }
 
   const auth = program.command('auth').description('authentication gates')
