@@ -119,7 +119,7 @@ describe('state-get', () => {
     emit(wire(1, 'state', 'auth', '{"authenticated":true}'))
     const res = await call('state-get', { key: 'auth.missingField' })
     expect(res).toMatchObject({ ok: false, error: { error: 'E_NO_MATCH' } })
-    expect((res as { error: { details: { key: string; path: string[] } } }).error.details).toMatchObject({
+    expect((res as unknown as { error: { details: { key: string; path: string[] } } }).error.details).toMatchObject({
       key: 'auth',
       path: ['missingField'],
     })

@@ -8,11 +8,13 @@
     "build": "tsc -p tsconfig.json",
     "postbuild": "chmod +x dist/cli/bin.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.test.json"
   },
   "dependencies": {
     "commander": "^12.1.0",
-    "fast-xml-parser": "^4.5.0"
+    "fast-xml-parser": "^4.5.0",
+    "smol-toml": "^1.8.0"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",

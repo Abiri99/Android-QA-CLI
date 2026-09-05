@@ -17,6 +17,10 @@ export type ErrorCode =
   | 'E_TIMEOUT'
   | 'E_NOT_ATTACHED'
   | 'E_STATE_STALE'
+  | 'E_AUTH_REQUIRED'
+  | 'E_AUTH_TIMEOUT'
+  | 'E_NO_CONFIG'
+  | 'E_CONFIG_INVALID'
 
 export interface AgentQaErrorJson {
   error: ErrorCode
