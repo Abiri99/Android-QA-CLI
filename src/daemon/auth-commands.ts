@@ -60,6 +60,20 @@ function gateArg(gates: Gate[], args: Record<string, unknown>): Gate {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 /**
+ * The blindness of never having attached at all, reported with the same code
+ * and the same recovery as a capture that died (`deadCaptureError`). The two
+ * cases differ only in how they arose: in both, nothing this wait depends on
+ * can ever arrive, and the fix is `agentqa state attach`.
+ */
+function notAttachedError(serial: string): AgentQaError {
+  return new AgentQaError(
+    'E_NOT_ATTACHED',
+    `no capture stream is attached to ${serial}, so a state-based gate condition could never be observed and this wait would be blind; run \`agentqa state attach\` before the app starts`,
+    { serial, running: false, attached: false },
+  )
+}
+
+/**
  * The only accepted value today is `checkpoint`. Silently ignoring anything
  * else would tell an agent that typoed `--resume-to checkpiont` that its
  * request succeeded, when nothing it asked for happened.
@@ -190,7 +204,6 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
 
     const readScreen = needsScreen(gate.until)
     const gateHasState = hasState(gate.until)
-    const capture = deps.captures.get(device.serial)
 
     const settled = async (): Promise<{ verdict: string; basis: string }> => {
       const ctx = await gateContext(deps, device.serial, [gate], readScreen)
@@ -199,11 +212,11 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
     }
 
     const deadline = Date.now() + timeoutMs
-    // Set once the capture is observed dead on a hybrid `until` — screen
-    // polling keeps going (it does not need the capture), but the state half
-    // of `until` has gone blind, and a resulting E_AUTH_TIMEOUT needs to say so
-    // rather than implying the human never authenticated.
-    let captureDied = false
+    // Set once the state half of `until` is observed blind on a hybrid gate —
+    // screen polling keeps going (it does not need the capture), but the state
+    // half has nothing to look at, and a resulting E_AUTH_TIMEOUT needs to say
+    // so rather than implying the human never authenticated.
+    let captureBlind = false
 
     for (;;) {
       const { verdict, basis } = await settled()
@@ -244,18 +257,28 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
         return cleared
       }
 
-      if (capture) {
-        const dead = deadCaptureError(capture, device.serial)
-        if (dead) {
-          // A state-only wait against a stopped capture will never see anything
-          // arrive. Burning the timeout and reporting E_AUTH_TIMEOUT would tell
-          // the agent the human did not authenticate; the truth is we stopped
-          // looking. Fail fast rather than block for the rest of the timeout.
-          if (!readScreen) throw dead
+      // Looked up on every pass, not once before the loop. A capture that was
+      // never attached at all is exactly as blind as one that died: every poll
+      // evaluates `unknown`, and a wait that runs to E_AUTH_TIMEOUT on that
+      // basis reports that the human failed to authenticate when the truth is
+      // that nothing was ever observable. Per-pass lookup also picks up a
+      // capture attached mid-wait.
+      if (gateHasState) {
+        const capture = deps.captures.get(device.serial)
+        const blind = capture
+          ? deadCaptureError(capture, device.serial)
+          : notAttachedError(device.serial)
+        if (blind) {
+          // A state-only wait against a stream that is not delivering will
+          // never see anything arrive. Burning the timeout and reporting
+          // E_AUTH_TIMEOUT would tell the agent the human did not
+          // authenticate; the truth is that we are not looking. Fail fast
+          // rather than block for the rest of the timeout.
+          if (!readScreen) throw blind
           // A hybrid `until` still has a working path to success via the
-          // screen, so keep polling — just remember the state half went blind
-          // so the eventual timeout (if any) can say so.
-          captureDied = true
+          // screen, so keep polling — just remember the state half is blind so
+          // the eventual timeout (if any) can say so.
+          captureBlind = true
         }
       }
 
@@ -263,8 +286,8 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
         throw new AgentQaError(
           'E_AUTH_TIMEOUT',
           `gate "${gate.name}" did not clear within ${timeoutMs}ms: ${gate.message}` +
-            (captureDied && gateHasState
-              ? ` (the capture stream for ${device.serial} stopped during this wait, so the state half of this gate's until could not be observed — this timeout is not evidence the human failed to authenticate)`
+            (captureBlind
+              ? ` (there was no live capture stream for ${device.serial} during this wait — it was never attached, or it stopped — so the state half of this gate's until could not be observed; this timeout is not evidence the human failed to authenticate. Run \`agentqa state attach\` and retry)`
               : ''),
           {
             gate: gate.name,
@@ -273,7 +296,7 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
             timeoutMs,
             lastVerdict: verdict,
             human_action_required: true,
-            ...(captureDied && gateHasState ? { captureDead: true } : {}),
+            ...(captureBlind ? { captureDead: true } : {}),
           },
         )
       }

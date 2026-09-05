@@ -185,6 +185,66 @@ describe('auth-wait', () => {
     }
   })
 
+  it('fails fast when a state gate is waiting and no capture was ever attached', async () => {
+    // The absent-capture case, not the dead-capture one. Nothing is attached,
+    // so every poll evaluates `unknown`; running to E_AUTH_TIMEOUT would tell
+    // the agent the human did not authenticate, when the truth is that the
+    // state half was never observable at all.
+    const { call } = build([LOGIN])
+    const started = Date.now()
+    try {
+      await call('auth-wait', { projectRoot: '/p', gate: 'login', timeout: 5000, intervalMs: 5 })
+      throw new Error('expected auth-wait to throw')
+    } catch (e) {
+      if (!isAgentQaError(e)) throw e
+      expect(e.code).toBe('E_NOT_ATTACHED')
+      expect(e.message).toContain('state attach')
+    }
+    // Fast, not at the five-second deadline.
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('flags the unobservable state half when a hybrid until has no capture attached', async () => {
+    const HYBRID: GateConfig = {
+      name: 'hybrid', kind: 'credentials', message: 'Log in',
+      when: { state: 'auth.authenticated=false' },
+      until: { state: 'auth.authenticated=true', uiAny: ['text=Welcome back'] },
+    }
+    // No `captures.attach` at all: the UI half still has a path to success, so
+    // the wait must keep polling — but the timeout has to disclose that the
+    // state half was blind rather than implying a failed human.
+    const { call } = build([HYBRID], [element('Not welcome yet')])
+    try {
+      await call('auth-wait', { projectRoot: '/p', gate: 'hybrid', timeout: 60, intervalMs: 5 })
+      throw new Error('expected auth-wait to throw')
+    } catch (e) {
+      if (!isAgentQaError(e)) throw e
+      expect(e.code).toBe('E_AUTH_TIMEOUT')
+      expect(e.details?.captureDead).toBe(true)
+      expect(e.message).toContain('could not be observed')
+      expect(e.message).toContain('never attached')
+    }
+  })
+
+  it('picks up a capture attached after the wait has already started', async () => {
+    const HYBRID: GateConfig = {
+      name: 'hybrid', kind: 'credentials', message: 'Log in',
+      when: { state: 'auth.authenticated=false' },
+      until: { state: 'auth.authenticated=true', uiAny: ['text=Welcome back'] },
+    }
+    const { call, captures } = build([HYBRID], [element('Not welcome yet')])
+    const pending = call('auth-wait', {
+      projectRoot: '/p', gate: 'hybrid', timeout: 5000, intervalMs: 5,
+    })
+    setTimeout(() => {
+      const capture = captures.attach(SERIAL)
+      capture.projection.apply({ kind: 'state', key: 'auth', payload: '{"authenticated":true}', seq: 1 })
+    }, 20)
+    const result = (await pending) as { cleared: boolean; confirmed: boolean }
+    expect(result.cleared).toBe(true)
+    expect(result.confirmed).toBe(true)
+  })
+
   it('reports a dead capture in the timeout payload for a hybrid until, instead of aborting early', async () => {
     const HYBRID: GateConfig = {
       name: 'hybrid', kind: 'credentials', message: 'Log in',
