@@ -11,7 +11,7 @@ import { evaluateGate, evaluateAny } from '../auth/evaluate.js'
 import type { EvalContext, GateStatus, ScreenRead } from '../auth/evaluate.js'
 import { needsScreen, hasState } from '../auth/gate.js'
 import type { Gate } from '../auth/gate.js'
-import { isEmulator } from '../auth/auto.js'
+import { isAutomatable } from '../auth/auto.js'
 import type { CheckpointStore } from '../auth/checkpoint.js'
 
 export interface AuthDeps {
@@ -151,18 +151,6 @@ export interface GateReport extends GateStatus {
   automatable: boolean
   /** What happened to the screen dump this evaluation ran against. */
   screenRead: ScreenRead
-}
-
-/**
- * A pure predicate: whether `attemptAuto` would even try, without actually
- * touching the device. `evaluateAll` backs `auth check`, which must not have
- * side effects, so this mirrors `attemptAuto`'s gating logic but never calls
- * it.
- */
-function isAutomatable(gate: Gate, serial: string): boolean {
-  if (!isEmulator(serial)) return false
-  if (gate.kind === 'biometric') return true
-  return gate.kind === 'otp_sms' && gate.autoSmsBody !== undefined
 }
 
 export interface EvaluateAllResult {

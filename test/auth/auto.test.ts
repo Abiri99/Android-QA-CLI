@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { attemptAuto, isEmulator } from '../../src/auth/auto.js'
+import { attemptAuto, isAutomatable, isEmulator } from '../../src/auth/auto.js'
 import { compileGate } from '../../src/auth/gate.js'
 import type { AdbRunner } from '../../src/adb/runner.js'
 import type { GateConfig } from '../../src/config/types.js'
@@ -105,4 +105,29 @@ describe('attemptAuto — never automated', () => {
       expect(calls).toHaveLength(0)
     }
   })
+})
+
+describe('isAutomatable and attemptAuto share one policy', () => {
+  const kinds = [
+    'credentials', 'biometric', 'otp_sms', 'oauth_web', 'device_credential', 'captcha',
+  ] as const
+  const serials = ['emulator-5554', 'R58M12345XY']
+
+  // `auth check` prints `(auto)` from `isAutomatable` and the guard acts from
+  // `attemptAuto`. They are now one predicate, and this pins the equivalence
+  // across the whole matrix so a future split is caught: a gate reported
+  // automatable that nothing will attempt is a confident wrong claim about
+  // whether a human is needed.
+  for (const kind of kinds) {
+    for (const smsBody of [undefined, '123456']) {
+      for (const serial of serials) {
+        it(`agrees for ${kind} on ${serial}${smsBody ? ' with auto_sms_body' : ''}`, async () => {
+          const g = compileGate(gate({ kind, ...(smsBody ? { autoSmsBody: smsBody } : {}) }))
+          const { adb } = recorder()
+          const result = await attemptAuto(g, serial, adb)
+          expect(isAutomatable(g, serial)).toBe(result.attempted)
+        })
+      }
+    }
+  }
 })
