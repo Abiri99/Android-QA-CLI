@@ -278,6 +278,9 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
             try {
               output = await deps.adb.text(deeplinkIntentArgs(cp.deeplink, config.applicationId), {
                 serial: device.serial,
+                // Same reason as the `deeplink` command: the resolution check
+                // below cannot see a failure the shell sent to stderr.
+                includeStderr: true,
               })
             } catch (e) {
               return {

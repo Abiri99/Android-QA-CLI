@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { CommandRegistry } from '../../src/daemon/server.js'
-import { registerCommands, DriverRegistry } from '../../src/daemon/commands.js'
+import { registerCommands, DriverRegistry, intentResolutionFailed } from '../../src/daemon/commands.js'
 import { RefStore } from '../../src/daemon/refs.js'
 import { CaptureManager } from '../../src/state/capture.js'
 import { FakeDriver } from '../../src/driver/fake-driver.js'
@@ -8,7 +8,7 @@ import { FakeStreamer } from '../helpers/fake-stream.js'
 import { CheckpointStore } from '../../src/auth/checkpoint.js'
 import { callFor } from '../helpers/call.js'
 import { isAgentQaError } from '../../src/core/errors.js'
-import type { AdbRunner } from '../../src/adb/runner.js'
+import type { AdbOpts, AdbRunner } from '../../src/adb/runner.js'
 
 const SERIAL = 'emulator-5554'
 
@@ -17,10 +17,12 @@ function build(
   applicationIdFor?: (root: string) => string | undefined,
 ) {
   const calls: string[][] = []
+  const opts: (AdbOpts | undefined)[] = []
   const adb: AdbRunner = {
-    async text(args) {
+    async text(args, o) {
       if (args[0] === 'devices') return `List of devices attached\n${SERIAL}\tdevice\n`
       calls.push(args)
+      opts.push(o)
       return amOutput
     },
     async binary() { return Buffer.alloc(0) },
@@ -37,7 +39,7 @@ function build(
     checkpoints,
     applicationIdFor,
   )
-  return { call: callFor(registry), calls, checkpoints }
+  return { call: callFor(registry), calls, opts, checkpoints }
 }
 
 const UNRESOLVED =
@@ -139,5 +141,62 @@ describe('deeplink', () => {
       if (!isAgentQaError(e)) throw e
       expect(e.code).toBe('E_BAD_ARGS')
     }
+  })
+})
+
+describe('intentResolutionFailed', () => {
+  it('recognises the message am start prints on a zero exit', () => {
+    expect(intentResolutionFailed(UNRESOLVED)).toBe(true)
+  })
+
+  it('recognises the message wherever the shell routed it, with no leading Starting line', () => {
+    expect(
+      intentResolutionFailed('Error: Activity not started, unable to resolve Intent'),
+    ).toBe(true)
+  })
+
+  it('recognises an Error line for an activity that does not exist', () => {
+    expect(
+      intentResolutionFailed(
+        'Error: Activity class {com.example/.Main} does not exist.',
+      ),
+    ).toBe(true)
+  })
+
+  it('accepts the ordinary success output', () => {
+    expect(
+      intentResolutionFailed('Starting: Intent { act=android.intent.action.VIEW }'),
+    ).toBe(false)
+  })
+
+  it('accepts the benign warning about a task already in front', () => {
+    expect(
+      intentResolutionFailed(
+        'Starting: Intent { act=android.intent.action.VIEW }\nWarning: Activity not started, its current task has been brought to the front',
+      ),
+    ).toBe(false)
+  })
+
+  it('is not fooled by an error parameter inside the echoed uri', () => {
+    // `am start` echoes the intent it was given. A deep link carrying an OAuth
+    // failure back into the app is an ordinary uri, not a failed navigation,
+    // and treating it as one throws away a checkpoint that was fine.
+    expect(
+      intentResolutionFailed(
+        'Starting: Intent { act=android.intent.action.VIEW dat=example://callback?error:denied }',
+      ),
+    ).toBe(false)
+  })
+})
+
+describe('deeplink stream handling', () => {
+  it('asks for stderr, since am start may report a failed resolution on either stream', () => {
+    // Without this the resolution check reads stdout alone and is silently
+    // inert wherever the shell protocol routes the message to stderr — a fix
+    // that looks present in the code and does nothing on the device.
+    const { call, opts } = build()
+    return call('deeplink', { uri: 'example://cart' }).then(() => {
+      expect(opts[0]).toMatchObject({ includeStderr: true })
+    })
   })
 })

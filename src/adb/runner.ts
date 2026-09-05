@@ -7,6 +7,18 @@ import { AgentQaError } from '../core/errors.js'
 export interface AdbOpts {
   serial?: string
   timeoutMs?: number
+  /**
+   * Fold stderr into the text `text()` returns.
+   *
+   * Some adb commands report a failure on a zero exit — `am start` prints
+   * "Activity not started, unable to resolve Intent" and exits 0 — and which
+   * stream that lands on varies by device and shell protocol. A caller that
+   * must read such a message needs both streams, or its check is silently
+   * inert on the devices that route it the other way.
+   *
+   * Ignored by `binary()`, where interleaving stderr would corrupt the payload.
+   */
+  includeStderr?: boolean
 }
 
 export interface AdbRunner {
@@ -20,14 +32,20 @@ export class ExecAdbRunner implements AdbRunner {
   constructor(private readonly adbPath: string) {}
 
   async text(args: string[], opts: AdbOpts = {}): Promise<string> {
-    return (await this.run(args, opts)).toString('utf8')
+    const { out, err } = await this.run(args, opts)
+    const text = out.toString('utf8')
+    if (!opts.includeStderr) return text
+    const stderr = err.toString('utf8')
+    return stderr.length > 0 ? `${text}${text.endsWith('\n') || text.length === 0 ? '' : '\n'}${stderr}` : text
   }
 
   async binary(args: string[], opts: AdbOpts = {}): Promise<Buffer> {
-    return this.run(args, opts)
+    // Deliberately ignores `includeStderr`: a screenshot with a warning
+    // spliced into it is not a screenshot.
+    return (await this.run(args, opts)).out
   }
 
-  private run(args: string[], opts: AdbOpts): Promise<Buffer> {
+  private run(args: string[], opts: AdbOpts): Promise<{ out: Buffer; err: Buffer }> {
     const full = opts.serial ? ['-s', opts.serial, ...args] : args
     return new Promise((resolve, reject) => {
       const child = spawn(this.adbPath, full, { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -58,7 +76,7 @@ export class ExecAdbRunner implements AdbRunner {
       child.on('close', (code) => {
         clearTimeout(timer)
         if (code === 0) {
-          resolve(Buffer.concat(out))
+          resolve({ out: Buffer.concat(out), err: Buffer.concat(err) })
         } else {
           reject(new AgentQaError('E_ADB_FAILED', Buffer.concat(err).toString('utf8').trim() || `adb exited ${code}`, {
             args: full,

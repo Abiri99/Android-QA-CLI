@@ -188,9 +188,19 @@ function captureEndedError(capture: Capture, serial: string): AgentQaError {
  * is not evidence a navigation happened. Reporting one anyway is a successful
  * side effect assumed to have had its intended effect — the agent believes it
  * is on the checkout screen while the device sits wherever it was.
+ *
+ * Anchored to the start of a line, because `am start` echoes back the intent it
+ * was given: a perfectly ordinary deep link carrying an OAuth failure home
+ * (`example://callback?error:denied`) appears inside that echo, and a loose
+ * substring match reads it as a failed navigation and throws away a checkpoint
+ * that was fine. `Warning: Activity not started, its current task has been
+ * brought to the front` is the common benign case and must not match either.
  */
+const AM_FAILURE = /^\s*Error:/m
+const AM_UNRESOLVED = /unable to resolve Intent/i
+
 export function intentResolutionFailed(output: string): boolean {
-  return /\bError:|unable to resolve/i.test(output)
+  return AM_FAILURE.test(output) || AM_UNRESOLVED.test(output)
 }
 
 /**
@@ -394,7 +404,12 @@ export function registerCommands(
       (projectRoot === undefined ? undefined : applicationIdFor?.(projectRoot))
     const command = deeplinkIntentArgs(uri, applicationId)
     try {
-      const output = await adb.text(command, { serial: device.serial })
+      const output = await adb.text(command, {
+        serial: device.serial,
+        // The resolution check below reads this text; stdout alone would make
+        // it inert wherever the shell routes the failure to stderr.
+        includeStderr: true,
+      })
       const resolved = !intentResolutionFailed(output)
       // Only a link that actually resolved is worth remembering: a checkpoint
       // that replays one which started nothing returns to nowhere, and says it

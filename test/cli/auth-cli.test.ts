@@ -108,6 +108,34 @@ describe('auth CLI: exit codes and rendering', () => {
     expect(await main(['auth', 'check', '--project', home, '--json'], out)).toBe(1)
   })
 
+  // The daemon is long-lived and per-machine: `agentqa` upgrades in place while
+  // a daemon spawned by the previous build is still listening, and the version
+  // handshake cannot tell them apart because the package version did not move.
+  // A CLI that dereferences a field that build never sent turns a stale daemon
+  // into an E_INTERNAL crash instead of an answer.
+  it('survives a daemon whose response predates the unevaluable field', async () => {
+    await serve((r) =>
+      r.register('auth-check', async () => ({
+        serial: 'emulator-5554',
+        gates: [report({ open: 'no' })],
+        blocking: null,
+      })),
+    )
+    expect(await main(['auth', 'check', '--project', home, '--json'], out)).toBe(0)
+  })
+
+  it('renders a pre-unevaluable daemon response without throwing', async () => {
+    await serve((r) =>
+      r.register('auth-status', async () => ({
+        serial: 'emulator-5554',
+        gates: [report({ open: 'no' })],
+        blocking: null,
+      })),
+    )
+    expect(await main(['auth', 'status', '--project', home], out)).toBe(0)
+    expect(lines.join('\n')).not.toContain('E_INTERNAL')
+  })
+
   it('says in words that gates were not evaluated, rather than leaving it to the ? marks', async () => {
     await serve((r) =>
       r.register('auth-check', async () => ({

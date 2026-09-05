@@ -472,7 +472,11 @@ export async function main(
 
   const auth = program.command('auth').description('authentication gates')
 
-  type GateSummary = { gates: GateReport[]; blocking: string | null; unevaluable: string[] }
+  // `unevaluable` is optional because this describes what arrives over the
+  // socket, not what this build's daemon sends. A daemon from an earlier build
+  // of the same package version answers without it, and a type that promises
+  // otherwise is what let the CLI dereference it and crash.
+  type GateSummary = { gates: GateReport[]; blocking: string | null; unevaluable?: string[] }
 
   const renderGates = (data: GateSummary): string => {
     if (data.gates.length === 0) return '(no auth gates configured)'
@@ -495,10 +499,16 @@ export async function main(
     // Said in words, not left to be inferred from the `?` marks. "No gate is
     // open" and "no gate could be evaluated" are different answers, and only
     // one of them means the caller is safe to proceed.
-    if (data.unevaluable.length > 0) {
+    // `?? []` because the daemon is long-lived and per-machine: an `agentqa`
+    // upgraded in place can talk to a daemon spawned by the previous build,
+    // and the version handshake cannot tell them apart when the package
+    // version did not move. Dereferencing a field that build never sent turns
+    // a stale daemon into an E_INTERNAL crash instead of an answer.
+    const unevaluable = data.unevaluable ?? []
+    if (unevaluable.length > 0) {
       lines.push(
         '',
-        `not evaluated: ${data.unevaluable.join(', ')} — these gates could not be evaluated, so this is not a report that you are unblocked`,
+        `not evaluated: ${unevaluable.join(', ')} — these gates could not be evaluated, so this is not a report that you are unblocked`,
       )
     }
     return lines.join('\n')
@@ -538,7 +548,7 @@ export async function main(
       // result is not that, so it exits non-zero too — the exit code's job is
       // to stop a script that would otherwise proceed into a flow it may be
       // locked out of. A caller that needs the two apart reads the JSON.
-      if (data.blocking || data.unevaluable.length > 0) exitCode = 1
+      if (data.blocking || (data.unevaluable ?? []).length > 0) exitCode = 1
     })
 
   auth
