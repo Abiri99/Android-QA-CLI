@@ -1,5 +1,6 @@
 import { writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { dirname } from 'node:path'
 import { CommanderError } from 'commander'
 import { DaemonClient } from '../ipc/client.js'
 import { daemonSocketPath } from '../core/paths.js'
@@ -14,6 +15,8 @@ import type { LogLine } from '../adb/logcat.js'
 import { ExecAdbRunner, resolveAdbPath } from '../adb/runner.js'
 import { listDevices } from '../adb/devices.js'
 import { runChecks, renderChecks } from './doctor.js'
+import { findConfig } from '../config/load.js'
+import type { GateReport } from '../daemon/auth-commands.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../../package.json') as { version: string }
@@ -378,6 +381,66 @@ export async function main(
         lines: opts.lines,
       })) as { lines: LogLine[] }
       emit(data, () => renderLogs(data.lines), jsonMode(opts), out)
+    })
+
+  // The daemon serves every project on the machine, so it needs to be told
+  // which one this command belongs to. Resolving the config file here rather
+  // than in the daemon means the daemon never guesses from its own cwd, which
+  // is wherever it happened to be spawned from.
+  const projectRoot = (explicit?: string): string => {
+    if (explicit) return explicit
+    const found = findConfig(process.cwd())
+    if (!found) {
+      throw new AgentQaError(
+        'E_NO_CONFIG',
+        `no agentqa.toml found in ${process.cwd()} or any parent directory — run this from inside a configured project, or pass --project <dir>`,
+        { searchedFrom: process.cwd() },
+      )
+    }
+    return dirname(found)
+  }
+
+  const auth = program.command('auth').description('authentication gates')
+
+  const renderGates = (data: { gates: GateReport[]; blocking: string | null }): string => {
+    if (data.gates.length === 0) return '(no auth gates configured)'
+    const lines = data.gates.map((g) => {
+      const mark = g.open === 'yes' ? 'OPEN' : g.open === 'no' ? 'ok' : '?'
+      const how = g.open === 'yes' ? (g.confirmed ? ' [confirmed]' : ' [inferred]') : ''
+      const hint = g.open === 'unknown' && g.needsScreen ? ' (needs `auth check`)' : ''
+      return `${mark.padEnd(5)} ${g.name}  ${g.kind}${how}${hint}`
+    })
+    if (data.blocking) lines.push('', `blocked by: ${data.blocking}`)
+    return lines.join('\n')
+  }
+
+  auth
+    .command('status')
+    .description('report each gate from state already captured — costs nothing, reads no screen')
+    .option('--device <serial>', 'target device serial')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { device?: string; project?: string; json?: boolean }) => {
+      const data = (await client.request('auth-status', {
+        serial: opts.device,
+        projectRoot: projectRoot(opts.project),
+      })) as { gates: GateReport[]; blocking: string | null }
+      emit(data, () => renderGates(data), jsonMode(opts), out)
+    })
+
+  auth
+    .command('check')
+    .description('force evaluation of every gate, reading the screen when one needs it')
+    .option('--device <serial>', 'target device serial')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { device?: string; project?: string; json?: boolean }) => {
+      const data = (await client.request('auth-check', {
+        serial: opts.device,
+        projectRoot: projectRoot(opts.project),
+      })) as { gates: GateReport[]; blocking: string | null }
+      emit(data, () => renderGates(data), jsonMode(opts), out)
+      if (data.blocking) exitCode = 1
     })
 
   program

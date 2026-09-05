@@ -2,16 +2,21 @@ import { ExecAdbRunner, resolveAdbPath } from '../adb/runner.js'
 import { ExecAdbStreamer } from '../adb/stream.js'
 import { daemonSocketPath, ensureHome } from '../core/paths.js'
 import { registerCommands, DriverRegistry } from './commands.js'
+import { registerAuthCommands } from './auth-commands.js'
 import { CommandRegistry, DaemonServer } from './server.js'
 import { RefStore } from './refs.js'
 import { CaptureManager } from '../state/capture.js'
+import { ConfigRegistry } from '../config/registry.js'
 
 export async function startDaemon(version: string): Promise<DaemonServer> {
   ensureHome()
   const adb = new ExecAdbRunner(resolveAdbPath())
   const registry = new CommandRegistry()
   const captures = new CaptureManager(new ExecAdbStreamer(resolveAdbPath()))
-  registerCommands(registry, new DriverRegistry(adb), adb, new RefStore(), captures)
+  const drivers = new DriverRegistry(adb)
+  const configs = new ConfigRegistry()
+  registerCommands(registry, drivers, adb, new RefStore(), captures)
+  registerAuthCommands(registry, { drivers, adb, captures, configs })
   const server = new DaemonServer(registry, version)
   await server.listen(daemonSocketPath())
   return server

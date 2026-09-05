@@ -1,29 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { Capture, CaptureManager, parsePid } from '../../src/state/capture.js'
-import type { AdbStream, AdbStreamer } from '../../src/adb/stream.js'
-
-class FakeStream implements AdbStream {
-  private lineFns: ((l: string) => void)[] = []
-  private exitFns: ((c: number | null) => void)[] = []
-  stopped = false
-  onLine(fn: (l: string) => void): void { this.lineFns.push(fn) }
-  onExit(fn: (c: number | null) => void): void { this.exitFns.push(fn) }
-  stop(): void { this.stopped = true; for (const f of this.exitFns) f(0) }
-  emit(line: string): void { for (const f of this.lineFns) f(line) }
-  /** The stream dying on its own: adb crashed, the device was unplugged. */
-  die(code: number | null = 1): void { for (const f of this.exitFns) f(code) }
-}
-
-class FakeStreamer implements AdbStreamer {
-  readonly streams: FakeStream[] = []
-  readonly calls: { args: string[]; serial?: string }[] = []
-  stream(args: string[], opts: { serial?: string } = {}): AdbStream {
-    this.calls.push({ args, serial: opts.serial })
-    const s = new FakeStream()
-    this.streams.push(s)
-    return s
-  }
-}
+import { FakeStreamer } from '../helpers/fake-stream.js'
 
 function wire(pid: number, seq: number, kind: string, key: string, payload: string): string {
   return `10-04 12:00:0${seq % 10}.000  ${pid}  ${pid} I AgentQA : AGENTQA|v1|${seq}|${kind}|${key}|1/1|${payload}`
