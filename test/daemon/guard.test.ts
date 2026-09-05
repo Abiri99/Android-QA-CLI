@@ -46,6 +46,28 @@ function projectConfig(notify: boolean): ProjectConfig {
   }
 }
 
+function biometricConfig(notify: boolean): ProjectConfig {
+  return {
+    root: '/p',
+    configPath: '/p/agentqa.toml',
+    module: 'app',
+    variant: 'debug',
+    activeBuildTypes: ['debug'],
+    strategy: 'manual',
+    notify,
+    traceEnabled: false,
+    gates: [
+      {
+        name: 'unlock',
+        kind: 'biometric',
+        message: 'Touch the fingerprint sensor',
+        when: { state: 'auth.authenticated=false' },
+        until: { state: 'auth.authenticated=true' },
+      },
+    ],
+  }
+}
+
 /** Records every notify() call; never rejects unless told to. */
 class RecordingNotifier implements Notifier {
   readonly calls: { title: string; message: string }[] = []
@@ -83,6 +105,48 @@ function build(notify: boolean, notifier: Notifier = new RecordingNotifier()) {
     notifierFor: (config) => (config.notify ? notifier : new NoopNotifier()),
   })
   return { guard, captures }
+}
+
+/**
+ * Builds a guard wired to a biometric gate, with an adb fake that records
+ * `emu finger touch` calls and lets each test decide what effect (if any) the
+ * touch has on the captured auth state — modelling that a successful adb call
+ * is not the same as the app having accepted the fingerprint.
+ */
+function buildBiometric(onEmuTouch: (captures: CaptureManager) => void) {
+  const emuCalls: string[][] = []
+  const notifier = new RecordingNotifier()
+  const captures = new CaptureManager(new FakeStreamer())
+  const adb: AdbRunner = {
+    async text(args) {
+      if (args[0] === 'devices') return `List of devices attached\n${SERIAL}\tdevice\n`
+      if (args[0] === 'emu') {
+        emuCalls.push(args)
+        onEmuTouch(captures)
+      }
+      return ''
+    },
+    async binary() {
+      return Buffer.alloc(0)
+    },
+  }
+  const driver = new FakeDriver({ elements: [] })
+  const drivers = new DriverRegistry(adb, () => driver)
+  const configs = new ConfigRegistry({
+    find: () => '/p/agentqa.toml',
+    stat: () => 1,
+    load: () => biometricConfig(true),
+  })
+  const tracker = new GateTracker()
+  const guard = createGateGuard({
+    drivers,
+    adb,
+    captures,
+    configs,
+    tracker,
+    notifierFor: () => notifier,
+  })
+  return { guard, captures, notifier, emuCalls }
 }
 
 function setAuthenticated(captures: CaptureManager, value: boolean): void {
@@ -182,5 +246,28 @@ describe('createGateGuard', () => {
     // The `.catch` in the guard swallows the rejection, so no unhandledRejection
     // event should surface. This assertion fails without the `.catch` handler.
     expect(rejections.length).toBe(0)
+  })
+
+  it('lets the command through with no error and no notification when an automatic attempt closes the gate', async () => {
+    const { guard, captures, notifier, emuCalls } = buildBiometric((caps) => {
+      // The app accepts the fingerprint: the state the gate watches flips.
+      setAuthenticated(caps, true)
+    })
+    setAuthenticated(captures, false)
+    const blocking = await guard(SERIAL, { projectRoot: '/p' })
+    expect(blocking).toBeNull()
+    expect(emuCalls).toEqual([['emu', 'finger', 'touch', '1']])
+    expect(notifier.calls.length).toBe(0)
+  })
+
+  it('still pauses when the automatic attempt succeeds at the adb layer but the gate stays open', async () => {
+    const { guard, captures, notifier, emuCalls } = buildBiometric(() => {
+      // adb accepted the command, but the app did not accept the fingerprint.
+    })
+    setAuthenticated(captures, false)
+    const blocking = await guard(SERIAL, { projectRoot: '/p' })
+    expect(blocking?.name).toBe('unlock')
+    expect(emuCalls).toEqual([['emu', 'finger', 'touch', '1']])
+    expect(notifier.calls.length).toBe(1)
   })
 })

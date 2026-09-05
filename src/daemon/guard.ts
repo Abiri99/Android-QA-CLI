@@ -1,6 +1,7 @@
 import type { AdbRunner } from '../adb/runner.js'
 import type { DriverRegistry, GateGuard } from './commands.js'
 import { evaluateAll } from './auth-commands.js'
+import { attemptAuto } from '../auth/auto.js'
 import type { CaptureManager } from '../state/capture.js'
 import type { ConfigRegistry } from '../config/registry.js'
 import type { Notifier } from '../auth/notify.js'
@@ -47,6 +48,24 @@ export function createGateGuard(deps: GuardDeps): GateGuard {
 
     const blocking = gates.find((g) => g.open === 'yes')
     if (!blocking) return null
+
+    // Try to resolve the gate ourselves before waking a human — the whole
+    // point of this task is converting a pause into a non-event.
+    const gate = configs.gatesForRoot(projectRoot).find((g) => g.name === blocking.name)
+    if (gate) {
+      const auto = await attemptAuto(gate, serial, adb)
+      if (auto.attempted) {
+        // Re-evaluate rather than assuming the attempt worked: `emu finger
+        // touch` succeeding means adb accepted the command, not that the app
+        // accepted the fingerprint.
+        const after = await evaluateAll({ drivers, adb, captures, configs }, serial, projectRoot, false)
+        const still = after.gates.find((g) => g.name === blocking.name)
+        if (still && still.open !== 'yes') {
+          tracker.clear(serial, blocking.name)
+          return null
+        }
+      }
+    }
 
     const notifier: Notifier = notifierFor(config)
     if (tracker.shouldNotify(serial, blocking.name)) {

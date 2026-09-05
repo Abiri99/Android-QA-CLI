@@ -11,6 +11,7 @@ import { evaluateGate, evaluateAny } from '../auth/evaluate.js'
 import type { EvalContext, GateStatus } from '../auth/evaluate.js'
 import { needsScreen, hasState } from '../auth/gate.js'
 import type { Gate } from '../auth/gate.js'
+import { isEmulator } from '../auth/auto.js'
 
 export interface AuthDeps {
   drivers: DriverRegistry
@@ -99,6 +100,20 @@ export async function gateContext(
 
 export interface GateReport extends GateStatus {
   needsScreen: boolean
+  /** Whether this gate can be satisfied without a human on this device. */
+  automatable: boolean
+}
+
+/**
+ * A pure predicate: whether `attemptAuto` would even try, without actually
+ * touching the device. `evaluateAll` backs `auth check`, which must not have
+ * side effects, so this mirrors `attemptAuto`'s gating logic but never calls
+ * it.
+ */
+function isAutomatable(gate: Gate, serial: string): boolean {
+  if (!isEmulator(serial)) return false
+  if (gate.kind === 'biometric') return true
+  return gate.kind === 'otp_sms' && gate.autoSmsBody !== undefined
 }
 
 export async function evaluateAll(
@@ -112,6 +127,7 @@ export async function evaluateAll(
   const reports = gates.map((g) => ({
     ...evaluateGate(g, ctx),
     needsScreen: needsScreen(g.open),
+    automatable: isAutomatable(g, serial),
   }))
   const open = reports.find((r) => r.open === 'yes')
   return { gates: reports, blocking: open ? open.name : null }

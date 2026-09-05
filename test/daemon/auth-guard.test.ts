@@ -47,6 +47,7 @@ const openGate: GateReport = {
   basis: 'state',
   confirmed: true,
   needsScreen: false,
+  automatable: false,
 }
 
 function build(guard: (serial: string) => Promise<GateReport | null>) {

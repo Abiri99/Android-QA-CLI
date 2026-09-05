@@ -442,7 +442,8 @@ export async function main(
       const mark = g.open === 'yes' ? 'OPEN' : g.open === 'no' ? 'ok' : '?'
       const how = g.open === 'yes' ? (g.confirmed ? ' [confirmed]' : ' [inferred]') : ''
       const hint = g.open === 'unknown' && g.needsScreen ? ' (needs `auth check`)' : ''
-      return `${mark.padEnd(5)} ${g.name}  ${g.kind}${how}${hint}`
+      const auto = g.automatable ? ' (auto)' : ''
+      return `${mark.padEnd(5)} ${g.name}  ${g.kind}${how}${hint}${auto}`
     })
     if (data.blocking) lines.push('', `blocked by: ${data.blocking}`)
     return lines.join('\n')
