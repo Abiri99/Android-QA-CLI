@@ -67,6 +67,16 @@ describe('evaluateCondition — state', () => {
     // it has not been superseded, which is not the same as knowing it is false.
     expect(evaluateCondition(cond!, { projection: p })).toBe('unknown')
   })
+
+  it('is no when a stale value would not match the predicate even if fresh', () => {
+    const p = projectionWith('auth', '{"authenticated":true}')
+    p.markAllStale()
+    // The value says the gate is closed. Even accounting for staleness, if it
+    // were fresh it would still not match the condition (auth.authenticated=false).
+    // This distinguishes genuine-no from unevaluable, preventing staleness from
+    // collapsing the tri-state: a closed gate must stay no, not unknown.
+    expect(evaluateCondition(cond!, { projection: p })).toBe('no')
+  })
 })
 
 describe('evaluateCondition — ui', () => {
@@ -134,6 +144,27 @@ describe('evaluateAny', () => {
 
   it('is unknown with basis none for an empty condition list', () => {
     expect(evaluateAny([], {})).toEqual({ verdict: 'unknown', basis: 'none' })
+  })
+
+  it('prefers state basis even when ui condition comes first, order-independent', () => {
+    // Both conditions yield yes. Basis preference for state (confirmed > inferred)
+    // must hold regardless of which condition appears first in the list.
+    // This pins the property against refactors that might alter the loop logic.
+    const gateWithUiFirst: GateConfig = {
+      name: 'ui_first',
+      kind: 'credentials',
+      message: 'Sign in',
+      when: { uiAny: ["text=Sign in"] },
+      orWhen: { state: 'auth.authenticated=false' },
+    }
+    const gate = compileGate(gateWithUiFirst)
+    const ctx = {
+      projection: projectionWith('auth', '{"authenticated":false}'),
+      elements: [element('Sign in')],
+    }
+    const result = evaluateAny(gate.open, ctx)
+    expect(result.verdict).toBe('yes')
+    expect(result.basis).toBe('state')
   })
 })
 
