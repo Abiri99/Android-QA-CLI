@@ -4,6 +4,7 @@ import { evaluate as evaluateUi } from '../ui/predicate.js'
 import type { ScreenElement } from '../ui/compact.js'
 import type { Condition, Gate } from './gate.js'
 import type { GateKind } from '../config/types.js'
+import type { ErrorCode } from '../core/errors.js'
 
 /**
  * Three answers, not two. `unknown` is the whole point of this module: spec 7.5
@@ -15,6 +16,21 @@ export type Verdict = 'yes' | 'no' | 'unknown'
 
 export type Basis = 'state' | 'ui' | 'none'
 
+/**
+ * What happened to the screen dump behind this evaluation.
+ *
+ * `elements: undefined` alone makes a UI condition read `unknown`, which is
+ * honest at the verdict level — but it flattens "we did not look" and "we
+ * tried to look and could not" into the same report. The consumer then tells
+ * the agent to run `auth check` in response to an `auth check` whose dump
+ * failed, and an agent that follows the hint loops. Carry the reason out.
+ */
+export interface ScreenRead {
+  status: 'ok' | 'failed' | 'skipped'
+  /** The code the dump failed with. Present exactly when `status` is `failed`. */
+  code?: ErrorCode
+}
+
 export interface EvalContext {
   projection?: Projection | undefined
   /**
@@ -23,6 +39,7 @@ export interface EvalContext {
    * nothing matched, no read at all is no evidence.
    */
   elements?: ScreenElement[] | undefined
+  screenRead?: ScreenRead | undefined
 }
 
 export interface GateStatus {

@@ -466,7 +466,15 @@ export async function main(
     const lines = data.gates.map((g) => {
       const mark = g.open === 'yes' ? 'OPEN' : g.open === 'no' ? 'ok' : '?'
       const how = g.open === 'yes' ? (g.confirmed ? ' [confirmed]' : ' [inferred]') : ''
-      const hint = g.open === 'unknown' && g.needsScreen ? ' (needs `auth check`)' : ''
+      // Worded from what actually happened to the dump. Recommending `auth
+      // check` in response to a dump that failed with E_UI_NOT_IDLE sends an
+      // agent round the same loop.
+      const hint =
+        g.open === 'unknown' && g.needsScreen
+          ? g.screenRead?.status === 'failed'
+            ? ` (screen could not be read: ${g.screenRead.code ?? 'unknown error'})`
+            : ' (needs `auth check`)'
+          : ''
       const auto = g.automatable ? ' (auto)' : ''
       return `${mark.padEnd(5)} ${g.name}  ${g.kind}${how}${hint}${auto}`
     })

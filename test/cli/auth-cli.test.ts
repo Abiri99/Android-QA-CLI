@@ -21,6 +21,7 @@ function report(over: Partial<GateReport> = {}): GateReport {
     confirmed: false,
     needsScreen: false,
     automatable: false,
+    screenRead: { status: 'skipped' },
     ...over,
   }
 }
@@ -131,5 +132,43 @@ describe('auth CLI: exit codes and rendering', () => {
       })),
     )
     expect(await main(['auth', 'status', '--project', home, '--json'], out)).toBe(0)
+  })
+
+  it('says the screen could not be read, instead of telling the agent to run the command that just failed', async () => {
+    // Following a `(needs auth check)` hint after the dump failed with
+    // E_UI_NOT_IDLE is a loop: the retry fails the same way.
+    await serve((r) =>
+      r.register('auth-check', async () => ({
+        serial: 'emulator-5554',
+        gates: [
+          report({
+            name: 'step_up',
+            kind: 'biometric',
+            needsScreen: true,
+            screenRead: { status: 'failed', code: 'E_UI_NOT_IDLE' },
+          }),
+        ],
+        blocking: null,
+        unevaluable: ['step_up'],
+      })),
+    )
+    await main(['auth', 'check', '--project', home], out)
+    const text = lines.join('\n')
+    expect(text).toContain('E_UI_NOT_IDLE')
+    expect(text).toContain('screen could not be read')
+    expect(text).not.toContain('needs `auth check`')
+  })
+
+  it('still points at auth check when the screen was simply never read', async () => {
+    await serve((r) =>
+      r.register('auth-status', async () => ({
+        serial: 'emulator-5554',
+        gates: [report({ name: 'step_up', needsScreen: true, screenRead: { status: 'skipped' } })],
+        blocking: null,
+        unevaluable: ['step_up'],
+      })),
+    )
+    await main(['auth', 'status', '--project', home], out)
+    expect(lines.join('\n')).toContain('needs `auth check`')
   })
 })

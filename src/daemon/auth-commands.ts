@@ -8,7 +8,7 @@ import { deadCaptureError, deeplinkIntentArgs, intentResolutionFailed } from './
 import type { CaptureManager } from '../state/capture.js'
 import type { ConfigRegistry } from '../config/registry.js'
 import { evaluateGate, evaluateAny } from '../auth/evaluate.js'
-import type { EvalContext, GateStatus } from '../auth/evaluate.js'
+import type { EvalContext, GateStatus, ScreenRead } from '../auth/evaluate.js'
 import { needsScreen, hasState } from '../auth/gate.js'
 import type { Gate } from '../auth/gate.js'
 import { isEmulator } from '../auth/auto.js'
@@ -117,25 +117,40 @@ export async function gateContext(
     readScreen && gates.some((g) => needsScreen(g.open) || needsScreen(g.until))
 
   let elements: EvalContext['elements']
+  let screenRead: ScreenRead = { status: 'skipped' }
   if (wantsScreen) {
     try {
       elements = (await deps.drivers.get(serial).screen()).elements
+      screenRead = { status: 'ok' }
     } catch (e) {
       if (!isAgentQaError(e)) throw e
       elements = undefined
+      // The verdict stays `unknown`, but the reason travels with it: a caller
+      // that only knows "unevaluable" ends up recommending the screen read
+      // that just failed.
+      screenRead = { status: 'failed', code: e.code }
     }
   }
 
   return {
     projection: capture?.projection,
     elements,
+    screenRead,
   }
 }
 
 export interface GateReport extends GateStatus {
+  /**
+   * Whether evaluating this gate costs a screen dump — derived from `open` AND
+   * `until`. A gate with a state `when` and a UI `until` needs one just as much
+   * as a UI `when` does; reporting `false` for it understated the cost and made
+   * the CLI's hint miss the gate that a screen read would actually help.
+   */
   needsScreen: boolean
   /** Whether this gate can be satisfied without a human on this device. */
   automatable: boolean
+  /** What happened to the screen dump this evaluation ran against. */
+  screenRead: ScreenRead
 }
 
 /**
@@ -174,10 +189,12 @@ export async function evaluateAll(
 ): Promise<EvaluateAllResult> {
   const gates = deps.configs.gatesForRoot(projectRoot)
   const ctx = await gateContext(deps, serial, gates, readScreen)
+  const screenRead: ScreenRead = ctx.screenRead ?? { status: 'skipped' }
   const reports = gates.map((g) => ({
     ...evaluateGate(g, ctx),
-    needsScreen: needsScreen(g.open),
+    needsScreen: needsScreen(g.open) || needsScreen(g.until),
     automatable: isAutomatable(g, serial),
+    screenRead,
   }))
   const open = reports.find((r) => r.open === 'yes')
   return {

@@ -7,7 +7,7 @@ import { CaptureManager } from '../../src/state/capture.js'
 import { FakeDriver } from '../../src/driver/fake-driver.js'
 import { FakeStreamer } from '../helpers/fake-stream.js'
 import { callFor } from '../helpers/call.js'
-import { isAgentQaError } from '../../src/core/errors.js'
+import { AgentQaError, isAgentQaError } from '../../src/core/errors.js'
 import { CheckpointStore } from '../../src/auth/checkpoint.js'
 import type { AdbRunner } from '../../src/adb/runner.js'
 import type { ProjectConfig } from '../../src/config/types.js'
@@ -69,10 +69,15 @@ const STEP_UP_UI = {
   when: { uiAny: ["text=Confirm it's you"] },
 }
 
-function build(gates: ProjectConfig['gates'], screen: ScreenElement[]) {
+function build(gates: ProjectConfig['gates'], screen: ScreenElement[], screenError?: Error) {
   const registry = new CommandRegistry()
   const adb = fakeAdb()
   const driver = new FakeDriver({ elements: screen })
+  if (screenError) {
+    driver.screen = async () => {
+      throw screenError
+    }
+  }
   const drivers = new DriverRegistry(adb, () => driver)
   const captures = new CaptureManager(new FakeStreamer())
   const configs = new ConfigRegistry({
@@ -207,6 +212,58 @@ describe('auth-check', () => {
     const { call, driver } = build([LOGIN_STATE], [])
     await call('auth-check', { projectRoot: '/p' })
     expect(driver.screenReads).toBe(0)
+  })
+
+  it('says the screen read failed and why, rather than only that the gate is unknown', async () => {
+    // The verdict staying `unknown` is right — an animating screen must not
+    // make `auth check` unusable. But the reason has to leave the function, or
+    // the CLI recommends the screen read that just failed.
+    const { call } = build(
+      [STEP_UP_UI],
+      [],
+      new AgentQaError('E_UI_NOT_IDLE', 'the screen is still animating'),
+    )
+    const result = (await call('auth-check', { projectRoot: '/p' })) as {
+      gates: { open: string; screenRead: { status: string; code?: string } }[]
+      unevaluable: string[]
+    }
+    expect(result.gates[0]!.open).toBe('unknown')
+    expect(result.gates[0]!.screenRead).toEqual({ status: 'failed', code: 'E_UI_NOT_IDLE' })
+    expect(result.unevaluable).toEqual(['step_up'])
+  })
+
+  it('reports screenRead ok when the dump succeeded', async () => {
+    const { call } = build([STEP_UP_UI], [element('Home')])
+    const result = (await call('auth-check', { projectRoot: '/p' })) as {
+      gates: { screenRead: { status: string } }[]
+    }
+    expect(result.gates[0]!.screenRead.status).toBe('ok')
+  })
+
+  it('reports screenRead skipped when no gate needed a dump', async () => {
+    const { call } = build([LOGIN_STATE], [])
+    const result = (await call('auth-check', { projectRoot: '/p' })) as {
+      gates: { screenRead: { status: string } }[]
+    }
+    expect(result.gates[0]!.screenRead.status).toBe('skipped')
+  })
+
+  it('counts a UI until as needing a screen, even when the when clause is state-based', async () => {
+    // Derived from `open` alone, a gate with a state `when` and a UI `until`
+    // reported needsScreen: false — understating the cost, and hiding from the
+    // CLI hint the very gate a screen read would help.
+    const HYBRID = {
+      name: 'hybrid',
+      kind: 'credentials' as const,
+      message: 'Log in',
+      when: { state: 'auth.authenticated=false' },
+      until: { uiAny: ['text=Welcome back'] },
+    }
+    const { call } = build([HYBRID], [])
+    const result = (await call('auth-status', { projectRoot: '/p' })) as {
+      gates: { needsScreen: boolean }[]
+    }
+    expect(result.gates[0]!.needsScreen).toBe(true)
   })
 
   it('surfaces a config error rather than reporting no gates', async () => {

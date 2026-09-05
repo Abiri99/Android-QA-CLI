@@ -48,6 +48,7 @@ const openGate: GateReport = {
   confirmed: true,
   needsScreen: false,
   automatable: false,
+  screenRead: { status: 'skipped' },
 }
 
 function build(guard: (serial: string) => Promise<GateReport | null>) {
