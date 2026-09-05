@@ -163,29 +163,24 @@ describe('createGateGuard', () => {
     const { guard, captures } = build(true, rejecting)
     setAuthenticated(captures, false)
 
-    // The guard fires `void notifier.notify(...)`, which does not attach a
-    // rejection handler of its own. A notifier whose promise rejects would
-    // therefore surface as a Node "unhandledRejection" unless something
-    // observes it — this listener does that (without touching production
-    // code) so the test suite's output stays clean while still proving the
-    // guard itself never awaits or throws because of it.
+    // The guard fires `void notifier.notify(...)` followed by `.catch(() => {})`,
+    // which swallows any rejection so it never surfaces as an unhandledRejection.
+    // This listener verifies that behavior: if the rejection handler were missing,
+    // this test would catch an event here.
     const rejections: unknown[] = []
     const onUnhandled = (reason: unknown) => rejections.push(reason)
     process.on('unhandledRejection', onUnhandled)
     try {
       const blocking = await guard(SERIAL, { projectRoot: '/p' })
       expect(blocking?.name).toBe('login')
-      // Give the rejected notify() promise a turn to be reported.
+      // Give any promise-rejection path a turn to surface.
       await new Promise((resolve) => setImmediate(resolve))
     } finally {
       process.off('unhandledRejection', onUnhandled)
     }
     expect(rejecting.calls.length).toBe(1)
-    // See the note in the report: the guard's `void notifier.notify(...)`
-    // leaves this promise unhandled in production too when a real notifier
-    // rejects — MacNotifier never does, but the seam now accepts any
-    // Notifier, so this is a real gap worth flagging rather than a test
-    // artifact.
-    expect(rejections.length).toBe(1)
+    // The `.catch` in the guard swallows the rejection, so no unhandledRejection
+    // event should surface. This assertion fails without the `.catch` handler.
+    expect(rejections.length).toBe(0)
   })
 })

@@ -50,9 +50,11 @@ export function createGateGuard(deps: GuardDeps): GateGuard {
 
     const notifier: Notifier = notifierFor(config)
     if (tracker.shouldNotify(serial, blocking.name)) {
-      // Deliberately not awaited: the human's banner must not be on the
-      // critical path of returning the error that tells the agent what to do.
-      void notifier.notify('agentqa — authentication required', blocking.message)
+      // Not awaited: the human's banner must not be on the critical path of
+      // returning the error that tells the agent what to do. The `catch` is not
+      // optional — an unhandled rejection would take the whole daemon down in
+      // Node 22, and a notifier that fails is the least important thing here.
+      void notifier.notify('agentqa — authentication required', blocking.message).catch(() => {})
     }
     return blocking
   }
