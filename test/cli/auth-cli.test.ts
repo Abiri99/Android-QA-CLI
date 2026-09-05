@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { main } from '../../src/cli/main.js'
 import { CommandRegistry, DaemonServer } from '../../src/daemon/server.js'
+import { AgentQaError } from '../../src/core/errors.js'
 import type { GateReport } from '../../src/daemon/auth-commands.js'
 
 const require = createRequire(import.meta.url)
@@ -170,5 +171,56 @@ describe('auth CLI: exit codes and rendering', () => {
     )
     await main(['auth', 'status', '--project', home], out)
     expect(lines.join('\n')).toContain('needs `auth check`')
+  })
+
+  it('prints the resume command a gate error carries, which is the actionable half of the payload', async () => {
+    // spec 7.1 says this payload renders "as a prompt" for a human at a TTY.
+    // `code: message` alone left the one command that unblocks the flow
+    // visible only under --json.
+    await serve((r) =>
+      r.register('tap', async () => {
+        throw new AgentQaError('E_AUTH_REQUIRED', 'authentication gate "login" is blocking: Log in', {
+          gate: 'login',
+          resume: 'agentqa auth wait --gate login --timeout 5m',
+          human_action_required: true,
+        })
+      }),
+    )
+    expect(await main(['tap', 'tag=go', '--project', home], out)).toBe(1)
+    expect(lines.join('\n')).toContain('agentqa auth wait --gate login --timeout 5m')
+  })
+
+  it('leaves an error with no resume unchanged', async () => {
+    await serve((r) =>
+      r.register('tap', async () => {
+        throw new AgentQaError('E_NO_MATCH', 'nothing matched tag=go', { target: 'tag=go' })
+      }),
+    )
+    expect(await main(['tap', 'tag=go', '--project', home], out)).toBe(1)
+    expect(lines.join('\n')).toBe('E_NO_MATCH: nothing matched tag=go')
+  })
+
+  it('mentions a gate that opened during a successful command, without --json', async () => {
+    await serve((r) =>
+      r.register('tap', async () => ({
+        ok: true,
+        serial: 'emulator-5554',
+        point: { x: 1, y: 2 },
+        authGate: report({ open: 'yes', confirmed: true, basis: 'state' }),
+      })),
+    )
+    expect(await main(['tap', 'tag=go', '--project', home], out)).toBe(0)
+    const text = lines.join('\n')
+    expect(text).toContain('tapped tag=go')
+    expect(text).toContain('auth gate login is now open')
+    expect(text).toContain('Log in with a test account')
+  })
+
+  it('says nothing extra when no gate opened', async () => {
+    await serve((r) =>
+      r.register('tap', async () => ({ ok: true, serial: 'emulator-5554', point: { x: 1, y: 2 } })),
+    )
+    expect(await main(['tap', 'tag=go', '--project', home], out)).toBe(0)
+    expect(lines.join('\n')).toBe('tapped tag=go')
   })
 })

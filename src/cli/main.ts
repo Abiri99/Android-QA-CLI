@@ -162,7 +162,7 @@ export async function main(
           durationMs: opts.duration,
           projectRoot: optionalProjectRoot(opts.project),
         })
-        emit(data, () => `tapped ${target}`, jsonMode(opts), out)
+        emit(data, () => `tapped ${target}` + authGateLine(data), jsonMode(opts), out)
       },
     )
 
@@ -179,7 +179,7 @@ export async function main(
         text,
         projectRoot: optionalProjectRoot(opts.project),
       })
-      emit(data, () => `typed ${JSON.stringify(text)}`, jsonMode(opts), out)
+      emit(data, () => `typed ${JSON.stringify(text)}` + authGateLine(data), jsonMode(opts), out)
     })
 
   program
@@ -204,7 +204,7 @@ export async function main(
           durationMs: opts.duration,
           projectRoot: optionalProjectRoot(opts.project),
         })
-        emit(data, () => `swiped ${from} -> ${to}`, jsonMode(opts), out)
+        emit(data, () => `swiped ${from} -> ${to}` + authGateLine(data), jsonMode(opts), out)
       },
     )
 
@@ -221,7 +221,7 @@ export async function main(
         name,
         projectRoot: optionalProjectRoot(opts.project),
       })
-      emit(data, () => `pressed ${name}`, jsonMode(opts), out)
+      emit(data, () => `pressed ${name}` + authGateLine(data), jsonMode(opts), out)
     })
 
   program
@@ -243,7 +243,7 @@ export async function main(
           applicationId: opts.applicationId,
           projectRoot: optionalProjectRoot(opts.project),
         })) as { uri: string }
-        emit(data, () => `opened ${data.uri}`, jsonMode(opts), out)
+        emit(data, () => `opened ${data.uri}` + authGateLine(data), jsonMode(opts), out)
       },
     )
 
@@ -455,6 +455,19 @@ export async function main(
     if (explicit) return explicit
     const found = findConfig(process.cwd())
     return found ? dirname(found) : undefined
+  }
+
+  /**
+   * One line when a mutating command's result carries a gate that opened.
+   *
+   * The action reached the device, so this is not an error — but under the
+   * default rendering the `authGate` was visible only with `--json`, and a
+   * human watching a flow pause saw a bare success line. The agent's next
+   * command fails fast with the full payload; this is the heads-up before it.
+   */
+  const authGateLine = (data: unknown): string => {
+    const gate = (data as { authGate?: GateReport } | null)?.authGate
+    return gate ? `\nauth gate ${gate.name} is now open: ${gate.message}` : ''
   }
 
   const auth = program.command('auth').description('authentication gates')
