@@ -334,6 +334,60 @@ describe('createGateGuard', () => {
     expect(checkpoints.get(SERIAL)?.screen).toBeNull()
   })
 
+  it('returns the resolved screen on the report, so E_AUTH_REQUIRED can carry it', async () => {
+    // spec 7.1's payload lists "screen": it is the field that tells the human
+    // where the pause happened. The guard resolves it four lines from the
+    // error and used to drop it.
+    const { guard, captures } = build(true)
+    setAuthenticated(captures, false)
+    const capture = captures.attach(SERIAL)
+    capture.projection.apply({
+      kind: 'state',
+      key: 'screen',
+      payload: JSON.stringify({ current: 'LoginScreen' }),
+      seq: 2,
+    })
+    const blocking = await guard(SERIAL, { projectRoot: '/p' })
+    expect(blocking?.screen).toBe('LoginScreen')
+  })
+
+  it('returns a null screen rather than a stale one', async () => {
+    const { guard, captures } = build(true)
+    setAuthenticated(captures, false)
+    const capture = captures.attach(SERIAL)
+    capture.projection.apply({
+      kind: 'state',
+      key: 'screen',
+      payload: JSON.stringify({ current: 'Cart' }),
+      seq: 2,
+    })
+    capture.projection.apply({
+      kind: 'state',
+      key: 'auth',
+      payload: JSON.stringify({ authenticated: false }),
+      seq: 100,
+    })
+    const blocking = await guard(SERIAL, { projectRoot: '/p' })
+    expect(blocking?.screen).toBeNull()
+  })
+
+  it('reports no screen rather than "[object Object]" when screen.current holds a table', async () => {
+    // `String(value)` on an object yields the literal "[object Object]", which
+    // as a screen name is a confident wrong answer dressed as data.
+    const { guard, captures, checkpoints } = build(true)
+    setAuthenticated(captures, false)
+    const capture = captures.attach(SERIAL)
+    capture.projection.apply({
+      kind: 'state',
+      key: 'screen',
+      payload: JSON.stringify({ current: { name: 'Cart', tab: 2 } }),
+      seq: 2,
+    })
+    const blocking = await guard(SERIAL, { projectRoot: '/p' })
+    expect(blocking?.screen).toBeNull()
+    expect(checkpoints.get(SERIAL)?.screen).toBeNull()
+  })
+
   it('does not record a checkpoint when an automatic attempt closes the gate', async () => {
     const { guard, captures, checkpoints } = buildBiometric((caps) => {
       setAuthenticated(caps, true)

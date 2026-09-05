@@ -77,6 +77,32 @@ describe('gate enforcement before a mutating command', () => {
     expect(driver.actions.filter((a) => a.startsWith('tap'))).toHaveLength(0)
   })
 
+  it('carries the screen the guard resolved into the E_AUTH_REQUIRED payload', async () => {
+    // spec 7.1: "screen" is the field that tells the human where the pause
+    // happened. The guard has it; the error was built without it.
+    const { call } = build(async () => ({ ...openGate, screen: 'LoginScreen' }))
+    try {
+      await call('tap', { target: 'tag=go' })
+      throw new Error('expected dispatch to throw')
+    } catch (e) {
+      if (!isAgentQaError(e)) throw e
+      expect(e.details?.screen).toBe('LoginScreen')
+    }
+  })
+
+  it('omits screen entirely when the guard could not resolve one', async () => {
+    // Absent, not null and not an empty string: a screen field that is present
+    // but meaningless reads as a screen name to anything consuming the payload.
+    const { call } = build(async () => ({ ...openGate, screen: null }))
+    try {
+      await call('tap', { target: 'tag=go' })
+      throw new Error('expected dispatch to throw')
+    } catch (e) {
+      if (!isAgentQaError(e)) throw e
+      expect(e.details && 'screen' in e.details).toBe(false)
+    }
+  })
+
   it('refuses type, swipe and key on the same terms', async () => {
     for (const [command, args] of [
       ['type', { text: 'hi' }],

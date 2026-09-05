@@ -77,13 +77,18 @@ export function createGateGuard(deps: GuardDeps): GateGuard {
     // this must not add a screen dump on top of every blocked command.
     const capture = captures.get(serial)
     const screenEntry = capture ? resolveKey(capture.projection, 'screen.current') : undefined
-    const screen =
+    // Typed, not stringified. `String(value)` yields the literal
+    // "[object Object]" when `screen.current` holds a table rather than a
+    // string, and reporting that as the screen name is worse than reporting
+    // nothing. Staleness stays disqualifying for the same reason.
+    const raw =
       screenEntry && !screenEntry.entry.stale
-        ? String(readPath(screenEntry.entry.value, screenEntry.path) ?? '')
-        : null
+        ? readPath(screenEntry.entry.value, screenEntry.path)
+        : undefined
+    const screen = typeof raw === 'string' && raw.length > 0 ? raw : null
     checkpoints.record({
       serial,
-      screen: screen && screen.length > 0 ? screen : null,
+      screen,
       deeplink: null,
       gate: blocking.name,
       at: Date.now(),
@@ -97,6 +102,9 @@ export function createGateGuard(deps: GuardDeps): GateGuard {
       // Node 22, and a notifier that fails is the least important thing here.
       void notifier.notify('agentqa — authentication required', blocking.message).catch(() => {})
     }
-    return blocking
+    // Carried out with the report rather than recomputed by the command layer:
+    // this is the same value, resolved under the same staleness discipline,
+    // that the checkpoint just recorded.
+    return { ...blocking, screen }
   }
 }

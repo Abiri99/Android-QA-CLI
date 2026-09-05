@@ -24,10 +24,25 @@ import type { CheckpointStore } from '../auth/checkpoint.js'
  * testable without a config file, and so the daemon can leave it unset for a
  * project that declares no gates.
  */
+/**
+ * The blocking gate, plus what the guard already knows about where the device
+ * is. The guard resolves `screen.current` from the projection anyway, for the
+ * checkpoint; spec 7.1's payload lists `"screen"` as the field that tells the
+ * human where the pause happened, so it travels the four lines to the error
+ * rather than being computed and dropped.
+ *
+ * `null` means the screen is not instrumented, or the projection's value for
+ * it is stale — a stale screen reported as the current one is its own
+ * confident wrong answer.
+ */
+export interface BlockingGate extends GateReport {
+  screen?: string | null
+}
+
 export type GateGuard = (
   serial: string,
   args: Record<string, unknown>,
-) => Promise<GateReport | null>
+) => Promise<BlockingGate | null>
 
 /**
  * Builds the driver for one device serial. This is the seam the spec's
@@ -226,7 +241,10 @@ export function registerCommands(
     if (!guard) return
     const blocking = await guard(serial, args)
     if (!blocking) return
-    throw authRequiredError(blocking, { serial })
+    throw authRequiredError(blocking, {
+      serial,
+      ...(blocking.screen ? { screen: blocking.screen } : {}),
+    })
   }
 
   /**
@@ -244,7 +262,7 @@ export function registerCommands(
   async function gateAfter(
     serial: string,
     args: Record<string, unknown>,
-  ): Promise<{ authGate?: GateReport }> {
+  ): Promise<{ authGate?: BlockingGate }> {
     if (!guard) return {}
     try {
       const blocking = await guard(serial, args)
