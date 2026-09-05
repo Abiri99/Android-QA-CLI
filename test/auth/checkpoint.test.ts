@@ -42,6 +42,19 @@ describe('CheckpointStore', () => {
     expect(s.get('d2')?.deeplink).toBeNull()
   })
 
+  it('forgetDeeplink discards only the remembered link, not a recorded checkpoint', () => {
+    const s = new CheckpointStore()
+    s.noteDeeplink('d1', 'example://cart')
+    s.record({ serial: 'd1', screen: 'Cart', gate: 'login', deeplink: 'example://cart', at: 1 })
+    s.forgetDeeplink('d1')
+    // The checkpoint recorded before forgetting must survive untouched.
+    expect(s.get('d1')?.screen).toBe('Cart')
+    expect(s.get('d1')?.deeplink).toBe('example://cart')
+    // But a checkpoint recorded afterwards no longer backfills the stale link.
+    s.record({ serial: 'd1', screen: 'Checkout', deeplink: null, gate: 'step_up', at: 2 })
+    expect(s.get('d1')?.deeplink).toBeNull()
+  })
+
   it('clear forgets both the checkpoint and the remembered deeplink', () => {
     const s = new CheckpointStore()
     s.noteDeeplink('d1', 'example://cart')

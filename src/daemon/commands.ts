@@ -165,6 +165,27 @@ function captureEndedError(capture: Capture, serial: string): AgentQaError {
   )
 }
 
+/**
+ * The `am start` argv for a `VIEW` intent against a deep link, shared between
+ * the `deeplink` command (below) and `auth-wait --resume-to checkpoint`'s
+ * replay of a remembered one — the same intent, built from two different
+ * places, must not drift apart one flag at a time.
+ */
+export function deeplinkIntentArgs(uri: string, applicationId: string | undefined): string[] {
+  return [
+    'shell',
+    'am',
+    'start',
+    '-a',
+    'android.intent.action.VIEW',
+    '-d',
+    uri,
+    // Without a package the system may show a chooser, which is not a screen
+    // the flow asked for and which every subsequent selector then misses.
+    ...(applicationId === undefined ? [] : ['-p', applicationId]),
+  ]
+}
+
 export function registerCommands(
   registry: CommandRegistry,
   drivers: DriverRegistry,
@@ -262,6 +283,7 @@ export function registerCommands(
       await drivers.get(device.serial).tap(point, durationMs === undefined ? {} : { durationMs })
     } finally {
       refs.invalidate(device.serial)
+      checkpoints?.forgetDeeplink(device.serial)
     }
     return { ok: true, serial: device.serial, point, ...(await gateAfter(device.serial, args)) }
   })
@@ -274,6 +296,7 @@ export function registerCommands(
       await drivers.get(device.serial).typeText(text)
     } finally {
       refs.invalidate(device.serial)
+      checkpoints?.forgetDeeplink(device.serial)
     }
     return { ok: true, serial: device.serial, ...(await gateAfter(device.serial, args)) }
   })
@@ -291,6 +314,7 @@ export function registerCommands(
       await drivers.get(device.serial).swipe(from, to, durationMs)
     } finally {
       refs.invalidate(device.serial)
+      checkpoints?.forgetDeeplink(device.serial)
     }
     return { ok: true, serial: device.serial, from, to, ...(await gateAfter(device.serial, args)) }
   })
@@ -303,6 +327,7 @@ export function registerCommands(
       await drivers.get(device.serial).key(name)
     } finally {
       refs.invalidate(device.serial)
+      checkpoints?.forgetDeeplink(device.serial)
     }
     return { ok: true, serial: device.serial, ...(await gateAfter(device.serial, args)) }
   })
@@ -322,18 +347,7 @@ export function registerCommands(
     const device = await selectDevice(adb, serialArg(args))
     await requireNoGate(device.serial, args)
     const applicationId = stringOptArg(args, 'applicationId')
-    const command = [
-      'shell',
-      'am',
-      'start',
-      '-a',
-      'android.intent.action.VIEW',
-      '-d',
-      uri,
-      // Without a package the system may show a chooser, which is not a screen
-      // the flow asked for and which every subsequent selector then misses.
-      ...(applicationId === undefined ? [] : ['-p', applicationId]),
-    ]
+    const command = deeplinkIntentArgs(uri, applicationId)
     try {
       const output = await adb.text(command, { serial: device.serial })
       checkpoints?.noteDeeplink(device.serial, uri)

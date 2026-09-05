@@ -61,6 +61,17 @@ describe('deeplink', () => {
     expect(checkpoints.get(SERIAL)?.deeplink).toBe('example://cart')
   })
 
+  it('forgets the remembered deeplink once a later command navigates elsewhere', async () => {
+    // The bug this pins: without invalidation, a deeplink followed by an
+    // unrelated tap and then a gate pause would backfill the stale link into
+    // a checkpoint that has nothing to do with it.
+    const { call, checkpoints } = build()
+    await call('deeplink', { uri: 'example://cart' })
+    await call('tap', { target: '540,1200' })
+    checkpoints.record({ serial: SERIAL, screen: 'Checkout', deeplink: null, gate: 'step_up', at: 2 })
+    expect(checkpoints.get(SERIAL)?.deeplink).toBeNull()
+  })
+
   it('invalidates refs, since the screen is about to change', async () => {
     // Same contract as tap/type/swipe/key: a ref from the previous screen is
     // meaningless once a deep link has navigated away.

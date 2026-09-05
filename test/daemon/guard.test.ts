@@ -299,6 +299,34 @@ describe('createGateGuard', () => {
     expect(checkpoints.get(SERIAL)?.screen).toBe('Cart')
   })
 
+  it('records a null screen when the screen key is present but marked stale', async () => {
+    // A gap in the capture stream leaves `screen.current` in the projection
+    // but no longer trustworthy — serving it as the checkpoint's screen would
+    // be exactly the stale-read failure spec 5.2 exists to prevent.
+    const { guard, captures, checkpoints } = build(true)
+    setAuthenticated(captures, false)
+    const capture = captures.attach(SERIAL)
+    capture.projection.apply({
+      kind: 'state',
+      key: 'screen',
+      payload: JSON.stringify({ current: 'Cart' }),
+      seq: 2,
+    })
+    // A non-contiguous seq is a gap: everything written before it (the screen
+    // write above) reads stale from here on. Re-asserting `auth` here, on the
+    // write that itself crosses the gap, keeps the gate's own condition fresh
+    // — isolating staleness to the screen key, which is what this test means
+    // to exercise.
+    capture.projection.apply({
+      kind: 'state',
+      key: 'auth',
+      payload: JSON.stringify({ authenticated: false }),
+      seq: 100,
+    })
+    await guard(SERIAL, { projectRoot: '/p' })
+    expect(checkpoints.get(SERIAL)?.screen).toBeNull()
+  })
+
   it('records a null screen when the projection has no screen key', async () => {
     const { guard, captures, checkpoints } = build(true)
     setAuthenticated(captures, false)

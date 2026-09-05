@@ -30,6 +30,23 @@ export class CheckpointStore {
     this.lastDeeplink.set(serial, uri)
   }
 
+  /**
+   * Forgets the remembered deep link for a device, without touching any
+   * checkpoint already recorded.
+   *
+   * The remembered link means "how the flow arrived where it now is". That
+   * stops being true the moment anything else navigates the device — a tap, a
+   * typed string, a swipe, a key press — so every mutating command other than
+   * `deeplink` itself calls this, mirroring `RefStore.invalidate` in the same
+   * spot and for the same reason: once something else has acted, a stale
+   * reference to the previous screen is meaningless. Narrower than `clear`,
+   * which also discards a recorded checkpoint — a checkpoint records where the
+   * flow *paused*, which this must not disturb.
+   */
+  forgetDeeplink(serial: string): void {
+    this.lastDeeplink.delete(serial)
+  }
+
   record(cp: Checkpoint): void {
     this.checkpoints.set(cp.serial, {
       ...cp,

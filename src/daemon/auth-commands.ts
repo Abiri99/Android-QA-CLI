@@ -4,7 +4,7 @@ import { AgentQaError, isAgentQaError } from '../core/errors.js'
 import { parseDuration } from '../core/duration.js'
 import type { CommandRegistry } from './server.js'
 import type { DriverRegistry } from './commands.js'
-import { deadCaptureError } from './commands.js'
+import { deadCaptureError, deeplinkIntentArgs } from './commands.js'
 import type { CaptureManager } from '../state/capture.js'
 import type { ConfigRegistry } from '../config/registry.js'
 import { evaluateGate, evaluateAny } from '../auth/evaluate.js'
@@ -226,13 +226,9 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
           const cp = deps.checkpoints.get(device.serial)
           if (cp?.deeplink) {
             const config = deps.configs.forRoot(projectRoot)
-            await deps.adb.text(
-              [
-                'shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', cp.deeplink,
-                ...(config.applicationId === undefined ? [] : ['-p', config.applicationId]),
-              ],
-              { serial: device.serial },
-            )
+            await deps.adb.text(deeplinkIntentArgs(cp.deeplink, config.applicationId), {
+              serial: device.serial,
+            })
             return { ...cleared, resumed: 'deeplink', checkpoint: cp }
           }
           // No deep link to replay. Say what the checkpoint was and that we did
