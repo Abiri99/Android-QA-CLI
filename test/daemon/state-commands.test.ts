@@ -51,9 +51,11 @@ function build() {
     registry.dispatch({ id: 'x', version: '0.1.0', cmd, args })
   const emit = (line: string) => streamer.streams[0]!.emit(line)
   const die = (code: number | null = 1) => streamer.streams[0]!.die(code)
+  const dieOn = (i: number, code: number | null = 1) => streamer.streams[i]!.die(code)
+  const emitOn = (i: number, line: string) => streamer.streams[i]!.emit(line)
   const wire = (seq: number, kind: string, key: string, payload: string) =>
     `10-04 12:00:01.000  100  100 I AgentQA : AGENTQA|v1|${seq}|${kind}|${key}|1/1|${payload}`
-  return { call, emit, die, wire, streamer, captures }
+  return { call, emit, die, dieOn, emitOn, wire, streamer, captures }
 }
 
 describe('state-attach', () => {
@@ -379,5 +381,100 @@ describe('waits against a dead capture stream', () => {
       error: { details?: { lastExitCode?: number | null } }
     }
     expect(res.error.details?.lastExitCode).toBe(137)
+  })
+})
+
+
+describe('a stream dying mid-wait ends the wait promptly', () => {
+  // Correcting the verdict at timeout is not enough: with a long --timeout an
+  // agent sits blind for the whole of it. A wait that can no longer observe
+  // anything should end as soon as that becomes true.
+
+  it('wait-for state rejects as soon as the stream dies, not at the timeout', async () => {
+    const { call, die } = build()
+    await call('state-attach')
+    const started = Date.now()
+    const pending = call('wait-for-state', { predicate: 'auth=true', timeoutMs: 5000 })
+    setTimeout(() => die(1), 20)
+    expect(await pending).toMatchObject({ ok: false, error: { error: 'E_NOT_ATTACHED' } })
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('wait-for event rejects as soon as the stream dies, not at the timeout', async () => {
+    const { call, die } = build()
+    await call('state-attach')
+    const started = Date.now()
+    const pending = call('wait-for-event', { name: 'checkout.success', timeoutMs: 5000 })
+    setTimeout(() => die(1), 20)
+    expect(await pending).toMatchObject({ ok: false, error: { error: 'E_NOT_ATTACHED' } })
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('carries adb exit code through the prompt rejection too', async () => {
+    const { call, die } = build()
+    await call('state-attach')
+    const pending = call('wait-for-state', { predicate: 'auth=true', timeoutMs: 5000 })
+    setTimeout(() => die(137), 20)
+    const res = (await pending) as { error: { details?: { lastExitCode?: number | null } } }
+    expect(res.error.details?.lastExitCode).toBe(137)
+  })
+
+  it('a wait that succeeds first is unaffected by a later stream death', async () => {
+    const { call, emit, die, wire } = build()
+    await call('state-attach')
+    const pending = call('wait-for-state', { predicate: 'auth=true', timeoutMs: 5000 })
+    emit(wire(1, 'state', 'auth', 'true'))
+    expect(await pending).toMatchObject({ ok: true })
+    // The death arrives after the wait already settled; nothing should throw
+    // or double-settle.
+    die(1)
+  })
+})
+
+
+describe('captures are isolated from one another', () => {
+  // Note this does NOT exercise Capture's own wasCurrent guard: detach deletes
+  // the Capture, so re-attaching builds a fresh one with an empty handler set.
+  // The guard's regression test lives in test/state/capture.test.ts.
+  it('a dead stream from a previous capture does not end a wait on the current one', async () => {
+    const { call, dieOn, emitOn, wire, streamer } = build()
+    await call('state-attach')
+    await call('state-detach')
+    await call('state-attach')
+    expect(streamer.streams).toHaveLength(2)
+
+    const pending = call('wait-for-state', { predicate: 'auth=true', timeoutMs: 1000 })
+    // The stream we already replaced dies late. It retires nothing: the
+    // capture is alive on stream 1, so the wait must survive and still be
+    // satisfiable.
+    dieOn(0, 1)
+    emitOn(1, wire(1, 'state', 'auth', 'true'))
+    expect(await pending).toMatchObject({ ok: true })
+  })
+})
+
+
+describe('detaching while a wait is pending', () => {
+  // Behaviour introduced by onEnd, and worth pinning: detach removes the
+  // capture from the manager, so a wait left running would be unresolvable
+  // until its own deadline. Ending it at once is both correct and kinder.
+  it('ends the wait at once rather than leaving it to time out', async () => {
+    const { call } = build()
+    await call('state-attach')
+    const started = Date.now()
+    const pending = call('wait-for-state', { predicate: 'auth=true', timeoutMs: 5000 })
+    setTimeout(() => void call('state-detach'), 20)
+    expect(await pending).toMatchObject({ ok: false, error: { error: 'E_NOT_ATTACHED' } })
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('ends a pending event wait too', async () => {
+    const { call } = build()
+    await call('state-attach')
+    const started = Date.now()
+    const pending = call('wait-for-event', { name: 'checkout.success', timeoutMs: 5000 })
+    setTimeout(() => void call('state-detach'), 20)
+    expect(await pending).toMatchObject({ ok: false, error: { error: 'E_NOT_ATTACHED' } })
+    expect(Date.now() - started).toBeLessThan(1000)
   })
 })

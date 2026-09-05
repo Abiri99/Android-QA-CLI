@@ -276,3 +276,61 @@ describe('CaptureManager', () => {
     expect(streamer.streams.every((s) => s.stopped)).toBe(true)
   })
 })
+
+describe('Capture.onEnd', () => {
+  it('notifies subscribers when the stream dies', () => {
+    const streamer = new FakeStreamer()
+    const cap = new Capture(streamer, 'x')
+    cap.start()
+    let ended = 0
+    cap.onEnd(() => ended++)
+    streamer.streams[0]!.die(1)
+    expect(ended).toBe(1)
+  })
+
+  it('stops notifying after unsubscribe', () => {
+    const streamer = new FakeStreamer()
+    const cap = new Capture(streamer, 'x')
+    cap.start()
+    let ended = 0
+    const off = cap.onEnd(() => ended++)
+    off()
+    streamer.streams[0]!.die(1)
+    expect(ended).toBe(0)
+  })
+
+  it('a subscriber that throws does not stop the others or the stale marking', () => {
+    const streamer = new FakeStreamer()
+    const cap = new Capture(streamer, 'x')
+    cap.start()
+    streamer.streams[0]!.emit(
+      '10-04 12:00:01.000  100  100 I AgentQA : AGENTQA|v1|1|state|k|1/1|1',
+    )
+    let reached = false
+    cap.onEnd(() => {
+      throw new Error('subscriber blew up')
+    })
+    cap.onEnd(() => {
+      reached = true
+    })
+    streamer.streams[0]!.die(1)
+    expect(reached).toBe(true)
+    expect(cap.projection.get('k')?.stale).toBe(true)
+  })
+
+  it('a late exit from an already-replaced stream does not notify', () => {
+    const streamer = new FakeStreamer()
+    const cap = new Capture(streamer, 'x')
+    cap.start()
+    const first = streamer.streams[0]!
+    cap.stop() // fires first.stop(), which our fake reports as an exit
+    cap.start() // same Capture, new stream
+    let ended = 0
+    cap.onEnd(() => ended++)
+    // The stream we already replaced finally exits. It retires nothing — the
+    // capture is alive on the newer stream — so a wait subscribed here must
+    // not be woken.
+    first.die(1)
+    expect(ended).toBe(0)
+  })
+})
