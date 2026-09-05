@@ -11,6 +11,7 @@ import { ConfigRegistry } from '../config/registry.js'
 import { MacNotifier, NullNotifier } from '../auth/notify.js'
 import { GateTracker } from '../auth/tracker.js'
 import { CheckpointStore } from '../auth/checkpoint.js'
+import { clearAuthStateOnCaptureEnd } from '../auth/lifecycle.js'
 
 export async function startDaemon(version: string): Promise<DaemonServer> {
   ensureHome()
@@ -21,6 +22,10 @@ export async function startDaemon(version: string): Promise<DaemonServer> {
   const configs = new ConfigRegistry()
   const tracker = new GateTracker()
   const checkpoints = new CheckpointStore()
+  // Per-device auth state only means anything for the duration of a capture
+  // session. Without this nothing ever tells the tracker a session ended, so
+  // after a detach or a dropped stream the next open gate raises no banner.
+  clearAuthStateOnCaptureEnd(captures, tracker, checkpoints)
   const guard = createGateGuard({
     drivers,
     adb,
