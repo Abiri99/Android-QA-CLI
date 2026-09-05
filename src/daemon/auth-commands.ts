@@ -9,7 +9,7 @@ import type { CaptureManager } from '../state/capture.js'
 import type { ConfigRegistry } from '../config/registry.js'
 import { evaluateGate, evaluateAny } from '../auth/evaluate.js'
 import type { EvalContext, GateStatus } from '../auth/evaluate.js'
-import { needsScreen } from '../auth/gate.js'
+import { needsScreen, hasState } from '../auth/gate.js'
 import type { Gate } from '../auth/gate.js'
 
 export interface AuthDeps {
@@ -152,6 +152,7 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
     }
 
     const readScreen = needsScreen(gate.until)
+    const gateHasState = hasState(gate.until)
     const capture = deps.captures.get(device.serial)
 
     const settled = async (): Promise<{ verdict: string; basis: string }> => {
@@ -161,6 +162,11 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
     }
 
     const deadline = Date.now() + timeoutMs
+    // Set once the capture is observed dead on a hybrid `until` — screen
+    // polling keeps going (it does not need the capture), but the state half
+    // of `until` has gone blind, and a resulting E_AUTH_TIMEOUT needs to say so
+    // rather than implying the human never authenticated.
+    let captureDied = false
 
     for (;;) {
       const { verdict, basis } = await settled()
@@ -179,18 +185,28 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
         return cleared
       }
 
-      // A state-only wait against a stopped capture will never see anything
-      // arrive. Burning the timeout and reporting E_AUTH_TIMEOUT would tell the
-      // agent the human did not authenticate; the truth is we stopped looking.
-      if (!readScreen && capture) {
+      if (capture) {
         const dead = deadCaptureError(capture, device.serial)
-        if (dead) throw dead
+        if (dead) {
+          // A state-only wait against a stopped capture will never see anything
+          // arrive. Burning the timeout and reporting E_AUTH_TIMEOUT would tell
+          // the agent the human did not authenticate; the truth is we stopped
+          // looking. Fail fast rather than block for the rest of the timeout.
+          if (!readScreen) throw dead
+          // A hybrid `until` still has a working path to success via the
+          // screen, so keep polling — just remember the state half went blind
+          // so the eventual timeout (if any) can say so.
+          captureDied = true
+        }
       }
 
       if (Date.now() >= deadline) {
         throw new AgentQaError(
           'E_AUTH_TIMEOUT',
-          `gate "${gate.name}" did not clear within ${timeoutMs}ms: ${gate.message}`,
+          `gate "${gate.name}" did not clear within ${timeoutMs}ms: ${gate.message}` +
+            (captureDied && gateHasState
+              ? ` (the capture stream for ${device.serial} stopped during this wait, so the state half of this gate's until could not be observed — this timeout is not evidence the human failed to authenticate)`
+              : ''),
           {
             gate: gate.name,
             kind: gate.kind,
@@ -198,6 +214,7 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
             timeoutMs,
             lastVerdict: verdict,
             human_action_required: true,
+            ...(captureDied && gateHasState ? { captureDead: true } : {}),
           },
         )
       }

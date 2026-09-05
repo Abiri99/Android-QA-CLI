@@ -101,3 +101,8 @@ export function compileGates(cfg: ProjectConfig): Gate[] {
 export function needsScreen(conditions: Condition[]): boolean {
   return conditions.some((c) => c.kind === 'ui')
 }
+
+/** Whether any of these conditions is state-based. */
+export function hasState(conditions: Condition[]): boolean {
+  return conditions.some((c) => c.kind === 'state')
+}

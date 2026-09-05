@@ -161,4 +161,47 @@ describe('auth-wait', () => {
       expect(e.code).toBe('E_NOT_ATTACHED')
     }
   })
+
+  it('fails fast when the capture dies mid-wait, not just when it was already dead on entry', async () => {
+    const { call, captures } = build([LOGIN])
+    const capture = captures.attach(SERIAL)
+    capture.projection.apply({ kind: 'state', key: 'auth', payload: '{"authenticated":false}', seq: 1 })
+    const pending = call('auth-wait', {
+      projectRoot: '/p', gate: 'login', timeout: 5000, intervalMs: 5,
+    })
+    // Let at least one poll pass before killing the stream, so this proves the
+    // per-pass check fires — not just the check on entry.
+    setTimeout(() => capture.stop(), 20)
+    try {
+      await pending
+      throw new Error('expected auth-wait to throw')
+    } catch (e) {
+      if (!isAgentQaError(e)) throw e
+      expect(e.code).toBe('E_NOT_ATTACHED')
+    }
+  })
+
+  it('reports a dead capture in the timeout payload for a hybrid until, instead of aborting early', async () => {
+    const HYBRID: GateConfig = {
+      name: 'hybrid', kind: 'credentials', message: 'Log in',
+      when: { state: 'auth.authenticated=false' },
+      until: { state: 'auth.authenticated=true', uiAny: ['text=Welcome back'] },
+    }
+    const { call, captures } = build([HYBRID], [element('Not welcome yet')])
+    const capture = captures.attach(SERIAL)
+    capture.projection.apply({ kind: 'state', key: 'auth', payload: '{"authenticated":false}', seq: 1 })
+    setTimeout(() => capture.stop(), 10)
+    try {
+      await call('auth-wait', { projectRoot: '/p', gate: 'hybrid', timeout: 100, intervalMs: 5 })
+      throw new Error('expected auth-wait to throw')
+    } catch (e) {
+      if (!isAgentQaError(e)) throw e
+      // Not E_NOT_ATTACHED: the UI half of this hybrid until still has a
+      // working path to success via the screen, so the wait must not abort
+      // early just because the capture died.
+      expect(e.code).toBe('E_AUTH_TIMEOUT')
+      expect(e.details?.captureDead).toBe(true)
+      expect(e.message).toContain('could not be observed')
+    }
+  })
 })
