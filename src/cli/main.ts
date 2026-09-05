@@ -477,6 +477,32 @@ export async function main(
       if (data.blocking) exitCode = 1
     })
 
+  auth
+    .command('wait')
+    .description('block until an auth gate clears — this is what the human is doing meanwhile')
+    .requiredOption('--gate <name>', 'gate to wait for')
+    .option('--device <serial>', 'target device serial')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
+    .option('--timeout <duration>', 'give up after this long (5m, 30s, or milliseconds)', '5m')
+    .option('--interval <ms>', 'how often to re-check', Number)
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { gate: string; device?: string; project?: string; timeout?: string; interval?: number; json?: boolean }) => {
+      const data = (await client.request('auth-wait', {
+        serial: opts.device,
+        projectRoot: projectRoot(opts.project),
+        gate: opts.gate,
+        timeout: opts.timeout,
+        intervalMs: opts.interval,
+      })) as { gate: string; cleared: boolean; confirmed: boolean }
+      emit(
+        data,
+        () =>
+          `gate ${data.gate} cleared (${data.confirmed ? 'confirmed by app state' : 'inferred from the screen'})`,
+        jsonMode(opts),
+        out,
+      )
+    })
+
   program
     .command('doctor')
     .description('check that the environment is ready')

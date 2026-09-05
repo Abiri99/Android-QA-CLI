@@ -119,6 +119,51 @@ describe('DaemonClient', () => {
     }
   })
 
+  // `auth wait` carries its timeout as a duration string (`5m`), not the
+  // numeric `timeoutMs` every other long-running command uses. Without this,
+  // the client abandons the wait at the standard bound and reports E_TIMEOUT
+  // while the daemon is still waiting for the human to authenticate.
+  it('extends its bound past a command whose timeout is a duration string', async () => {
+    const registry = new CommandRegistry()
+    registry.register('auth-wait', async () => {
+      await new Promise((r) => setTimeout(r, 120))
+      return { cleared: true }
+    })
+    const server = new DaemonServer(registry, '0.1.0')
+    const sock = tmpSocket()
+    await server.listen(sock)
+    try {
+      const client = new DaemonClient(sock, '0.1.0', 60)
+      await expect(
+        client.request('auth-wait', { gate: 'login', timeout: '5m' }, { autostart: false }),
+      ).resolves.toEqual({ cleared: true })
+    } finally {
+      await server.close()
+    }
+  })
+
+  // A malformed duration is not this method's to report — the daemon owns
+  // that validation and names the offending value — so the client falls back
+  // to the standard bound rather than throwing locally.
+  it('falls back to the standard bound for a malformed duration string', async () => {
+    const registry = new CommandRegistry()
+    registry.register('auth-wait', async () => {
+      await new Promise((r) => setTimeout(r, 120))
+      return { cleared: true }
+    })
+    const server = new DaemonServer(registry, '0.1.0')
+    const sock = tmpSocket()
+    await server.listen(sock)
+    try {
+      const client = new DaemonClient(sock, '0.1.0', 60)
+      await expect(
+        client.request('auth-wait', { gate: 'login', timeout: 'soon' }, { autostart: false }),
+      ).rejects.toMatchObject({ code: 'E_INTERNAL', message: /did not respond within 60ms/ })
+    } finally {
+      await server.close()
+    }
+  })
+
   it('keeps the standard bound for a command with no timeout of its own', async () => {
     const registry = new CommandRegistry()
     registry.register('screen', async () => {

@@ -138,7 +138,7 @@ function keyNameArg(args: Record<string, unknown>): KeyName {
  * identical to never having attached — run `agentqa state attach`, which
  * restarts a dead capture.
  */
-function deadCaptureError(capture: Capture, serial: string): AgentQaError | null {
+export function deadCaptureError(capture: Capture, serial: string): AgentQaError | null {
   const stats = capture.stats()
   if (stats.running) return null
   return new AgentQaError(

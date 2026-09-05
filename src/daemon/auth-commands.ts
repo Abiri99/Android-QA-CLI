@@ -1,11 +1,13 @@
 import { selectDevice } from '../adb/devices.js'
 import type { AdbRunner } from '../adb/runner.js'
 import { AgentQaError, isAgentQaError } from '../core/errors.js'
+import { parseDuration } from '../core/duration.js'
 import type { CommandRegistry } from './server.js'
 import type { DriverRegistry } from './commands.js'
+import { deadCaptureError } from './commands.js'
 import type { CaptureManager } from '../state/capture.js'
 import type { ConfigRegistry } from '../config/registry.js'
-import { evaluateGate } from '../auth/evaluate.js'
+import { evaluateGate, evaluateAny } from '../auth/evaluate.js'
 import type { EvalContext, GateStatus } from '../auth/evaluate.js'
 import { needsScreen } from '../auth/gate.js'
 import type { Gate } from '../auth/gate.js'
@@ -33,6 +35,26 @@ function serialArg(args: Record<string, unknown>): string | undefined {
   const s = args.serial
   return typeof s === 'string' ? s : undefined
 }
+
+const DEFAULT_WAIT_MS = 300_000
+
+function gateArg(gates: Gate[], args: Record<string, unknown>): Gate {
+  const name = args.gate
+  if (typeof name !== 'string' || name.length === 0) {
+    throw new AgentQaError('E_BAD_ARGS', 'missing required argument: gate', { argument: 'gate' })
+  }
+  const gate = gates.find((g) => g.name === name)
+  if (!gate) {
+    throw new AgentQaError(
+      'E_BAD_ARGS',
+      `no gate named "${name}" is configured (configured gates: ${gates.map((g) => g.name).join(', ') || 'none'})`,
+      { gate: name, configured: gates.map((g) => g.name) },
+    )
+  }
+  return gate
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 /**
  * Builds the evidence a gate evaluation runs against.
@@ -108,5 +130,78 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
     const device = await selectDevice(deps.adb, serialArg(args))
     const result = await evaluateAll(deps, device.serial, projectRoot, true)
     return { serial: device.serial, ...result }
+  })
+
+  registry.register('auth-wait', async (args) => {
+    const projectRoot = projectRootArg(args)
+    const gates = deps.configs.gatesForRoot(projectRoot)
+    const gate = gateArg(gates, args)
+    const timeoutMs = parseDuration(args.timeout, DEFAULT_WAIT_MS)
+    const intervalMs = typeof args.intervalMs === 'number' ? args.intervalMs : 1_000
+    const device = await selectDevice(deps.adb, serialArg(args))
+
+    // A gate with no `until` cannot be waited on. Blocking for five minutes and
+    // then reporting a timeout would say the human did not authenticate, when
+    // the truth is that this gate was never able to tell us either way.
+    if (gate.until.length === 0) {
+      throw new AgentQaError(
+        'E_BAD_ARGS',
+        `gate "${gate.name}" declares no until condition, so its resolution cannot be detected — add an until clause to agentqa.toml, or verify the flow with \`agentqa screen\` instead`,
+        { gate: gate.name },
+      )
+    }
+
+    const readScreen = needsScreen(gate.until)
+    const capture = deps.captures.get(device.serial)
+
+    const settled = async (): Promise<{ verdict: string; basis: string }> => {
+      const ctx = await gateContext(deps, device.serial, [gate], readScreen)
+      const result = evaluateAny(gate.until, ctx)
+      return { verdict: result.verdict, basis: result.basis }
+    }
+
+    const deadline = Date.now() + timeoutMs
+
+    for (;;) {
+      const { verdict, basis } = await settled()
+      if (verdict === 'yes') {
+        // Named rather than returned inline: Task 10 inserts the `--resume-to`
+        // handling between building this and returning it.
+        const cleared = {
+          serial: device.serial,
+          gate: gate.name,
+          cleared: true,
+          // spec 7.5: only a state condition confirms. A screen that stopped
+          // showing the login button may have changed for unrelated reasons.
+          confirmed: basis === 'state',
+          basis,
+        }
+        return cleared
+      }
+
+      // A state-only wait against a stopped capture will never see anything
+      // arrive. Burning the timeout and reporting E_AUTH_TIMEOUT would tell the
+      // agent the human did not authenticate; the truth is we stopped looking.
+      if (!readScreen && capture) {
+        const dead = deadCaptureError(capture, device.serial)
+        if (dead) throw dead
+      }
+
+      if (Date.now() >= deadline) {
+        throw new AgentQaError(
+          'E_AUTH_TIMEOUT',
+          `gate "${gate.name}" did not clear within ${timeoutMs}ms: ${gate.message}`,
+          {
+            gate: gate.name,
+            kind: gate.kind,
+            device: device.serial,
+            timeoutMs,
+            lastVerdict: verdict,
+            human_action_required: true,
+          },
+        )
+      }
+      await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())))
+    }
   })
 }
