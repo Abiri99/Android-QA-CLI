@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { AgentQaError, isAgentQaError } from '../core/errors.js'
+import { parseDuration } from '../core/duration.js'
 import { encode, FrameDecoder, FrameDecodeError } from './protocol.js'
 import { isSocketListening } from './socket.js'
 import type { IpcMessage, IpcResponse } from './protocol.js'
@@ -95,8 +96,23 @@ export class DaemonClient {
    */
   private timeoutFor(args: Record<string, unknown>): number {
     const own = args.timeoutMs
-    if (typeof own !== 'number' || !Number.isFinite(own) || own <= 0) return this.requestTimeoutMs
-    return this.requestTimeoutMs + own
+    if (typeof own === 'number' && Number.isFinite(own) && own > 0) {
+      return this.requestTimeoutMs + own
+    }
+    // `auth wait` carries its timeout as a duration string (`5m`), which the
+    // numeric check above ignores — leaving the client to abandon a five-minute
+    // wait at its own bound and report E_TIMEOUT for a gate the human is still
+    // resolving. A malformed value is not this method's to report: the daemon
+    // owns that validation and names the offending value, so fall back to the
+    // standard bound and let the request through to be rejected properly.
+    if (args.timeout !== undefined) {
+      try {
+        return this.requestTimeoutMs + parseDuration(args.timeout, 0)
+      } catch {
+        return this.requestTimeoutMs
+      }
+    }
+    return this.requestTimeoutMs
   }
 
   // Resolves or rejects exactly once. Beyond the "matching response arrived"

@@ -167,13 +167,44 @@ export class Capture {
 
 export class CaptureManager {
   private captures = new Map<string, Capture>()
+  private sessionEndHandlers = new Set<(serial: string) => void>()
 
   constructor(private readonly streamer: AdbStreamer) {}
+
+  /**
+   * Subscribes to a device's capture session ending — detached, detached with
+   * everything else on shutdown, or the stream dying on its own. Returns an
+   * unsubscribe function.
+   *
+   * Deliberately a subscription rather than a direct call into whatever needs
+   * cleaning up: per-device state lives in several places (auth notification
+   * tracking, checkpoints), and the capture layer must not grow a dependency
+   * on any of them. The composition root subscribes; this only announces.
+   */
+  onSessionEnd(fn: (serial: string) => void): () => void {
+    this.sessionEndHandlers.add(fn)
+    return () => this.sessionEndHandlers.delete(fn)
+  }
+
+  private endSession(serial: string): void {
+    for (const fn of this.sessionEndHandlers) {
+      try {
+        fn(serial)
+      } catch {
+        // A subscriber that throws must not stop the others, nor derail the
+        // detach that is still in progress.
+      }
+    }
+  }
 
   attach(serial: string): Capture {
     let capture = this.captures.get(serial)
     if (!capture) {
       capture = new Capture(this.streamer, serial)
+      // Subscribed once, at creation. `Capture.onEnd` already fires for every
+      // way a session can end — an explicit `stop()` from detach/detachAll,
+      // and the stream exiting on its own — so this is the single seam.
+      capture.onEnd(() => this.endSession(serial))
       this.captures.set(serial, capture)
     }
     // Unconditional, and idempotent when the stream is alive: re-attaching is

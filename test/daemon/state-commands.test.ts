@@ -5,28 +5,7 @@ import { RefStore } from '../../src/daemon/refs.js'
 import { CaptureManager } from '../../src/state/capture.js'
 import { FakeDriver } from '../../src/driver/fake-driver.js'
 import type { AdbRunner } from '../../src/adb/runner.js'
-import type { AdbStream, AdbStreamer } from '../../src/adb/stream.js'
-
-class FakeStream implements AdbStream {
-  private lineFns: ((l: string) => void)[] = []
-  private exitFns: ((c: number | null) => void)[] = []
-  stopped = false
-  onLine(fn: (l: string) => void): void { this.lineFns.push(fn) }
-  onExit(fn: (c: number | null) => void): void { this.exitFns.push(fn) }
-  stop(): void { this.stopped = true }
-  emit(line: string): void { for (const f of this.lineFns) f(line) }
-  /** Simulates adb dying — device unplugged, `adb kill-server`, a crash. */
-  die(code: number | null = 1): void { for (const f of this.exitFns) f(code) }
-}
-
-class FakeStreamer implements AdbStreamer {
-  readonly streams: FakeStream[] = []
-  stream(): AdbStream {
-    const s = new FakeStream()
-    this.streams.push(s)
-    return s
-  }
-}
+import { FakeStreamer } from '../helpers/fake-stream.js'
 
 const adb: AdbRunner = {
   async text(args) {
@@ -119,7 +98,7 @@ describe('state-get', () => {
     emit(wire(1, 'state', 'auth', '{"authenticated":true}'))
     const res = await call('state-get', { key: 'auth.missingField' })
     expect(res).toMatchObject({ ok: false, error: { error: 'E_NO_MATCH' } })
-    expect((res as { error: { details: { key: string; path: string[] } } }).error.details).toMatchObject({
+    expect((res as unknown as { error: { details: { key: string; path: string[] } } }).error.details).toMatchObject({
       key: 'auth',
       path: ['missingField'],
     })

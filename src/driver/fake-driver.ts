@@ -4,6 +4,9 @@ import type { Point } from '../ui/target.js'
 export class FakeDriver implements Driver {
   readonly actions: string[] = []
 
+  /** How many times `screen()` was called — lets a test assert a command cost no device round trip. */
+  screenReads = 0
+
   /**
    * When set, the next mutating action (tap/type/swipe/key) throws this error
    * instead of completing, then clears itself. Lets tests simulate a driver
@@ -30,6 +33,7 @@ export class FakeDriver implements Driver {
   }
 
   async screen(opts: ScreenOpts = {}): Promise<ScreenSnapshot> {
+    this.screenReads++
     return opts.full ? this.snapshot : { elements: this.snapshot.elements }
   }
 

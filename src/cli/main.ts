@@ -1,5 +1,6 @@
 import { writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { dirname } from 'node:path'
 import { CommanderError } from 'commander'
 import { DaemonClient } from '../ipc/client.js'
 import { daemonSocketPath } from '../core/paths.js'
@@ -14,6 +15,8 @@ import type { LogLine } from '../adb/logcat.js'
 import { ExecAdbRunner, resolveAdbPath } from '../adb/runner.js'
 import { listDevices } from '../adb/devices.js'
 import { runChecks, renderChecks } from './doctor.js'
+import { findConfig } from '../config/load.js'
+import type { GateReport } from '../daemon/auth-commands.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../../package.json') as { version: string }
@@ -146,25 +149,37 @@ export async function main(
     .argument('<target>', 'tag=NAME, text="...", desc="...", #N, or x,y')
     .option('--device <serial>', 'target device serial')
     .option('--duration <ms>', 'long-press duration in milliseconds', Number)
+    .option('--project <dir>', 'project directory containing agentqa.toml')
     .option('--json', 'emit machine-readable JSON')
-    .action(async (target: string, opts: { device?: string; duration?: number; json?: boolean }) => {
-      const data = await client.request('tap', {
-        serial: opts.device,
-        target,
-        durationMs: opts.duration,
-      })
-      emit(data, () => `tapped ${target}`, jsonMode(opts), out)
-    })
+    .action(
+      async (
+        target: string,
+        opts: { device?: string; duration?: number; project?: string; json?: boolean },
+      ) => {
+        const data = await client.request('tap', {
+          serial: opts.device,
+          target,
+          durationMs: opts.duration,
+          projectRoot: optionalProjectRoot(opts.project),
+        })
+        emit(data, () => `tapped ${target}` + authGateLine(data), jsonMode(opts), out)
+      },
+    )
 
   program
     .command('type')
     .description('type text into the focused field')
     .argument('<text>', 'ASCII text to type')
     .option('--device <serial>', 'target device serial')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
     .option('--json', 'emit machine-readable JSON')
-    .action(async (text: string, opts: { device?: string; json?: boolean }) => {
-      const data = await client.request('type', { serial: opts.device, text })
-      emit(data, () => `typed ${JSON.stringify(text)}`, jsonMode(opts), out)
+    .action(async (text: string, opts: { device?: string; project?: string; json?: boolean }) => {
+      const data = await client.request('type', {
+        serial: opts.device,
+        text,
+        projectRoot: optionalProjectRoot(opts.project),
+      })
+      emit(data, () => `typed ${JSON.stringify(text)}` + authGateLine(data), jsonMode(opts), out)
     })
 
   program
@@ -174,27 +189,63 @@ export async function main(
     .argument('<to>', 'end: tag=NAME, #N, or x,y')
     .option('--device <serial>', 'target device serial')
     .option('--duration <ms>', 'swipe duration in milliseconds', Number)
+    .option('--project <dir>', 'project directory containing agentqa.toml')
     .option('--json', 'emit machine-readable JSON')
-    .action(async (from: string, to: string, opts: { device?: string; duration?: number; json?: boolean }) => {
-      const data = await client.request('swipe', {
-        serial: opts.device,
-        from,
-        to,
-        durationMs: opts.duration,
-      })
-      emit(data, () => `swiped ${from} -> ${to}`, jsonMode(opts), out)
-    })
+    .action(
+      async (
+        from: string,
+        to: string,
+        opts: { device?: string; duration?: number; project?: string; json?: boolean },
+      ) => {
+        const data = await client.request('swipe', {
+          serial: opts.device,
+          from,
+          to,
+          durationMs: opts.duration,
+          projectRoot: optionalProjectRoot(opts.project),
+        })
+        emit(data, () => `swiped ${from} -> ${to}` + authGateLine(data), jsonMode(opts), out)
+      },
+    )
 
   program
     .command('key')
     .description('press a hardware or navigation key')
     .argument('<name>', 'back, home, enter, tab, delete, up, down, left, right, menu, app_switch')
     .option('--device <serial>', 'target device serial')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
     .option('--json', 'emit machine-readable JSON')
-    .action(async (name: string, opts: { device?: string; json?: boolean }) => {
-      const data = await client.request('key', { serial: opts.device, name })
-      emit(data, () => `pressed ${name}`, jsonMode(opts), out)
+    .action(async (name: string, opts: { device?: string; project?: string; json?: boolean }) => {
+      const data = await client.request('key', {
+        serial: opts.device,
+        name,
+        projectRoot: optionalProjectRoot(opts.project),
+      })
+      emit(data, () => `pressed ${name}` + authGateLine(data), jsonMode(opts), out)
     })
+
+  program
+    .command('deeplink')
+    .description('open a deep link, so a flow can jump straight to a screen')
+    .argument('<uri>', 'the uri to open, for example example://cart')
+    .option('--device <serial>', 'target device serial')
+    .option('--application-id <id>', 'scope the intent to this package, avoiding the chooser')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
+    .option('--json', 'emit machine-readable JSON')
+    .action(
+      async (
+        uri: string,
+        opts: { device?: string; applicationId?: string; project?: string; json?: boolean },
+      ) => {
+        const data = (await client.request('deeplink', {
+          serial: opts.device,
+          uri,
+          applicationId: opts.applicationId,
+          projectRoot: optionalProjectRoot(opts.project),
+        })) as { uri: string }
+        emit(data, () => `opened ${data.uri}` + authGateLine(data), jsonMode(opts), out)
+      },
+    )
 
   const state = program
     .command('state')
@@ -378,6 +429,145 @@ export async function main(
         lines: opts.lines,
       })) as { lines: LogLine[] }
       emit(data, () => renderLogs(data.lines), jsonMode(opts), out)
+    })
+
+  // The daemon serves every project on the machine, so it needs to be told
+  // which one this command belongs to. Resolving the config file here rather
+  // than in the daemon means the daemon never guesses from its own cwd, which
+  // is wherever it happened to be spawned from.
+  const projectRoot = (explicit?: string): string => {
+    if (explicit) return explicit
+    const found = findConfig(process.cwd())
+    if (!found) {
+      throw new AgentQaError(
+        'E_NO_CONFIG',
+        `no agentqa.toml found in ${process.cwd()} or any parent directory — run this from inside a configured project, or pass --project <dir>`,
+        { searchedFrom: process.cwd() },
+      )
+    }
+    return dirname(found)
+  }
+
+  // The mutating commands (tap/type/swipe/key) send projectRoot too, so the
+  // daemon can gate them — but outside a project they must still work, so
+  // unlike `projectRoot` above, finding nothing is not an error.
+  const optionalProjectRoot = (explicit?: string): string | undefined => {
+    if (explicit) return explicit
+    const found = findConfig(process.cwd())
+    return found ? dirname(found) : undefined
+  }
+
+  /**
+   * One line when a mutating command's result carries a gate that opened.
+   *
+   * The action reached the device, so this is not an error — but under the
+   * default rendering the `authGate` was visible only with `--json`, and a
+   * human watching a flow pause saw a bare success line. The agent's next
+   * command fails fast with the full payload; this is the heads-up before it.
+   */
+  const authGateLine = (data: unknown): string => {
+    const gate = (data as { authGate?: GateReport } | null)?.authGate
+    return gate ? `\nauth gate ${gate.name} is now open: ${gate.message}` : ''
+  }
+
+  const auth = program.command('auth').description('authentication gates')
+
+  type GateSummary = { gates: GateReport[]; blocking: string | null; unevaluable: string[] }
+
+  const renderGates = (data: GateSummary): string => {
+    if (data.gates.length === 0) return '(no auth gates configured)'
+    const lines = data.gates.map((g) => {
+      const mark = g.open === 'yes' ? 'OPEN' : g.open === 'no' ? 'ok' : '?'
+      const how = g.open === 'yes' ? (g.confirmed ? ' [confirmed]' : ' [inferred]') : ''
+      // Worded from what actually happened to the dump. Recommending `auth
+      // check` in response to a dump that failed with E_UI_NOT_IDLE sends an
+      // agent round the same loop.
+      const hint =
+        g.open === 'unknown' && g.needsScreen
+          ? g.screenRead?.status === 'failed'
+            ? ` (screen could not be read: ${g.screenRead.code ?? 'unknown error'})`
+            : ' (needs `auth check`)'
+          : ''
+      const auto = g.automatable ? ' (auto)' : ''
+      return `${mark.padEnd(5)} ${g.name}  ${g.kind}${how}${hint}${auto}`
+    })
+    if (data.blocking) lines.push('', `blocked by: ${data.blocking}`)
+    // Said in words, not left to be inferred from the `?` marks. "No gate is
+    // open" and "no gate could be evaluated" are different answers, and only
+    // one of them means the caller is safe to proceed.
+    if (data.unevaluable.length > 0) {
+      lines.push(
+        '',
+        `not evaluated: ${data.unevaluable.join(', ')} — these gates could not be evaluated, so this is not a report that you are unblocked`,
+      )
+    }
+    return lines.join('\n')
+  }
+
+  auth
+    .command('status')
+    .description('report each gate from state already captured — costs nothing, reads no screen')
+    .option('--device <serial>', 'target device serial')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { device?: string; project?: string; json?: boolean }) => {
+      const data = (await client.request('auth-status', {
+        serial: opts.device,
+        projectRoot: projectRoot(opts.project),
+      })) as GateSummary
+      emit(data, () => renderGates(data), jsonMode(opts), out)
+      // Deliberately no non-zero exit for unevaluable gates here: `auth status`
+      // is the cheap, no-round-trip view and is expected to report unknowns
+      // routinely. Only `auth check`, which forces the screen read, claims to
+      // have actually looked.
+    })
+
+  auth
+    .command('check')
+    .description('force evaluation of every gate, reading the screen when one needs it')
+    .option('--device <serial>', 'target device serial')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { device?: string; project?: string; json?: boolean }) => {
+      const data = (await client.request('auth-check', {
+        serial: opts.device,
+        projectRoot: projectRoot(opts.project),
+      })) as GateSummary
+      emit(data, () => renderGates(data), jsonMode(opts), out)
+      // Exit 0 has to mean "I checked, and you are not blocked". An all-unknown
+      // result is not that, so it exits non-zero too — the exit code's job is
+      // to stop a script that would otherwise proceed into a flow it may be
+      // locked out of. A caller that needs the two apart reads the JSON.
+      if (data.blocking || data.unevaluable.length > 0) exitCode = 1
+    })
+
+  auth
+    .command('wait')
+    .description('block until an auth gate clears — this is what the human is doing meanwhile')
+    .requiredOption('--gate <name>', 'gate to wait for')
+    .option('--device <serial>', 'target device serial')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
+    .option('--timeout <duration>', 'give up after this long (5m, 30s, or milliseconds)', '5m')
+    .option('--interval <ms>', 'how often to re-check', Number)
+    .option('--resume-to <where>', 'return to where the flow paused: checkpoint')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { gate: string; device?: string; project?: string; timeout?: string; interval?: number; resumeTo?: string; json?: boolean }) => {
+      const data = (await client.request('auth-wait', {
+        serial: opts.device,
+        projectRoot: projectRoot(opts.project),
+        gate: opts.gate,
+        timeout: opts.timeout,
+        intervalMs: opts.interval,
+        resumeTo: opts.resumeTo,
+      })) as { gate: string; cleared: boolean; confirmed: boolean; resumed?: string }
+      emit(
+        data,
+        () =>
+          `gate ${data.gate} cleared (${data.confirmed ? 'confirmed by app state' : 'inferred from the screen'})` +
+          (data.resumed === undefined ? '' : `, resumed: ${data.resumed}`),
+        jsonMode(opts),
+        out,
+      )
     })
 
   program

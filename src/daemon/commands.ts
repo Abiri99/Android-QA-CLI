@@ -13,6 +13,36 @@ import type { KeyName } from '../driver/types.js'
 import { AgentQaError } from '../core/errors.js'
 import type { Capture, CaptureManager } from '../state/capture.js'
 import { parseStatePredicate, matchesState, resolveKey, readPath } from '../state/query.js'
+import { authRequiredError } from '../auth/error.js'
+import type { GateReport } from './auth-commands.js'
+import type { CheckpointStore } from '../auth/checkpoint.js'
+
+/**
+ * Returns the gate blocking this device, or null when nothing is.
+ *
+ * A function rather than the `AuthDeps` bundle so the command layer stays
+ * testable without a config file, and so the daemon can leave it unset for a
+ * project that declares no gates.
+ */
+/**
+ * The blocking gate, plus what the guard already knows about where the device
+ * is. The guard resolves `screen.current` from the projection anyway, for the
+ * checkpoint; spec 7.1's payload lists `"screen"` as the field that tells the
+ * human where the pause happened, so it travels the four lines to the error
+ * rather than being computed and dropped.
+ *
+ * `null` means the screen is not instrumented, or the projection's value for
+ * it is stale — a stale screen reported as the current one is its own
+ * confident wrong answer.
+ */
+export interface BlockingGate extends GateReport {
+  screen?: string | null
+}
+
+export type GateGuard = (
+  serial: string,
+  args: Record<string, unknown>,
+) => Promise<BlockingGate | null>
 
 /**
  * Builds the driver for one device serial. This is the seam the spec's
@@ -124,7 +154,7 @@ function keyNameArg(args: Record<string, unknown>): KeyName {
  * identical to never having attached — run `agentqa state attach`, which
  * restarts a dead capture.
  */
-function deadCaptureError(capture: Capture, serial: string): AgentQaError | null {
+export function deadCaptureError(capture: Capture, serial: string): AgentQaError | null {
   const stats = capture.stats()
   if (stats.running) return null
   return new AgentQaError(
@@ -150,13 +180,98 @@ function captureEndedError(capture: Capture, serial: string): AgentQaError {
   )
 }
 
+/**
+ * Whether an `am start` reported that it started nothing.
+ *
+ * `am start` exits 0 while printing `Error: Activity not started, unable to
+ * resolve Intent` for a link the app no longer handles, so a zero exit status
+ * is not evidence a navigation happened. Reporting one anyway is a successful
+ * side effect assumed to have had its intended effect — the agent believes it
+ * is on the checkout screen while the device sits wherever it was.
+ */
+export function intentResolutionFailed(output: string): boolean {
+  return /\bError:|unable to resolve/i.test(output)
+}
+
+/**
+ * The `am start` argv for a `VIEW` intent against a deep link, shared between
+ * the `deeplink` command (below) and `auth-wait --resume-to checkpoint`'s
+ * replay of a remembered one — the same intent, built from two different
+ * places, must not drift apart one flag at a time.
+ */
+export function deeplinkIntentArgs(uri: string, applicationId: string | undefined): string[] {
+  return [
+    'shell',
+    'am',
+    'start',
+    '-a',
+    'android.intent.action.VIEW',
+    '-d',
+    uri,
+    // Without a package the system may show a chooser, which is not a screen
+    // the flow asked for and which every subsequent selector then misses.
+    ...(applicationId === undefined ? [] : ['-p', applicationId]),
+  ]
+}
+
 export function registerCommands(
   registry: CommandRegistry,
   drivers: DriverRegistry,
   adb: AdbRunner,
   refs: RefStore,
   captures: CaptureManager,
+  guard?: GateGuard,
+  checkpoints?: CheckpointStore,
+  /**
+   * The project's `application_id`, for a `deeplink` the CLI did not scope
+   * explicitly. Without it the `deeplink` command and `auth wait --resume-to
+   * checkpoint`'s replay of the same link build different intents — one with
+   * `-p`, one without — so a replay does not reproduce the navigation it
+   * claims to. A function rather than the config registry, so the command
+   * layer keeps no dependency on config loading.
+   */
+  applicationIdFor?: (projectRoot: string) => string | undefined,
 ): void {
+  /**
+   * Runs before a mutating command acts. An open gate throws here, having done
+   * nothing, which is what makes the documented agent handling — relay, wait,
+   * retry (spec 9) — safe: the retry is the first attempt, not the second.
+   */
+  async function requireNoGate(serial: string, args: Record<string, unknown>): Promise<void> {
+    if (!guard) return
+    const blocking = await guard(serial, args)
+    if (!blocking) return
+    throw authRequiredError(blocking, {
+      serial,
+      ...(blocking.screen ? { screen: blocking.screen } : {}),
+    })
+  }
+
+  /**
+   * Runs after a mutating command has acted, and deliberately never throws.
+   *
+   * The action already reached the device. Turning a newly-opened gate into an
+   * error would tell the agent the tap failed when it landed, and the
+   * prescribed retry would tap twice. Report it alongside the success instead;
+   * the agent's next command hits `requireNoGate` and fails fast there, having
+   * done nothing.
+   *
+   * A guard that throws is swallowed for the same reason: a config file deleted
+   * mid-flow must not retroactively fail an action that happened.
+   */
+  async function gateAfter(
+    serial: string,
+    args: Record<string, unknown>,
+  ): Promise<{ authGate?: BlockingGate }> {
+    if (!guard) return {}
+    try {
+      const blocking = await guard(serial, args)
+      return blocking ? { authGate: blocking } : {}
+    } catch {
+      return {}
+    }
+  }
+
   registry.register('ping', async () => ({ ok: true }))
 
   registry.register('devices', async () => listDevices(adb))
@@ -201,29 +316,34 @@ export function registerCommands(
 
   registry.register('tap', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
+    await requireNoGate(device.serial, args)
     const point = await pointFor(device.serial, stringArg(args, 'target'))
     const durationMs = numberArg(args, 'durationMs')
     try {
       await drivers.get(device.serial).tap(point, durationMs === undefined ? {} : { durationMs })
     } finally {
       refs.invalidate(device.serial)
+      checkpoints?.forgetDeeplink(device.serial)
     }
-    return { ok: true, serial: device.serial, point }
+    return { ok: true, serial: device.serial, point, ...(await gateAfter(device.serial, args)) }
   })
 
   registry.register('type', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
+    await requireNoGate(device.serial, args)
     const text = stringArg(args, 'text')
     try {
       await drivers.get(device.serial).typeText(text)
     } finally {
       refs.invalidate(device.serial)
+      checkpoints?.forgetDeeplink(device.serial)
     }
-    return { ok: true, serial: device.serial }
+    return { ok: true, serial: device.serial, ...(await gateAfter(device.serial, args)) }
   })
 
   registry.register('swipe', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
+    await requireNoGate(device.serial, args)
     const [from, to] = await pointsFor(device.serial, [
       stringArg(args, 'from'),
       stringArg(args, 'to'),
@@ -234,19 +354,63 @@ export function registerCommands(
       await drivers.get(device.serial).swipe(from, to, durationMs)
     } finally {
       refs.invalidate(device.serial)
+      checkpoints?.forgetDeeplink(device.serial)
     }
-    return { ok: true, serial: device.serial, from, to }
+    return { ok: true, serial: device.serial, from, to, ...(await gateAfter(device.serial, args)) }
   })
 
   registry.register('key', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
+    await requireNoGate(device.serial, args)
     const name = keyNameArg(args)
     try {
       await drivers.get(device.serial).key(name)
     } finally {
       refs.invalidate(device.serial)
+      checkpoints?.forgetDeeplink(device.serial)
     }
-    return { ok: true, serial: device.serial }
+    return { ok: true, serial: device.serial, ...(await gateAfter(device.serial, args)) }
+  })
+
+  registry.register('deeplink', async (args) => {
+    const uri = stringArg(args, 'uri')
+    // `am start -d cart` starts nothing and reports success-shaped output. A
+    // uri with no scheme is a typo, and saying so beats a no-op that looks like
+    // a navigation.
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(uri)) {
+      throw new AgentQaError(
+        'E_BAD_ARGS',
+        `deep link uri needs a scheme: ${uri} (for example example://cart)`,
+        { uri },
+      )
+    }
+    const device = await selectDevice(adb, serialArg(args))
+    await requireNoGate(device.serial, args)
+    const projectRoot = typeof args.projectRoot === 'string' ? args.projectRoot : undefined
+    // Falls back to the project's application_id so this builds the same intent
+    // the checkpoint replay does.
+    const applicationId =
+      stringOptArg(args, 'applicationId') ??
+      (projectRoot === undefined ? undefined : applicationIdFor?.(projectRoot))
+    const command = deeplinkIntentArgs(uri, applicationId)
+    try {
+      const output = await adb.text(command, { serial: device.serial })
+      const resolved = !intentResolutionFailed(output)
+      // Only a link that actually resolved is worth remembering: a checkpoint
+      // that replays one which started nothing returns to nowhere, and says it
+      // returned somewhere.
+      if (resolved) checkpoints?.noteDeeplink(device.serial, uri)
+      return {
+        ok: true,
+        serial: device.serial,
+        uri,
+        resolved,
+        output: output.trim(),
+        ...(await gateAfter(device.serial, args)),
+      }
+    } finally {
+      refs.invalidate(device.serial)
+    }
   })
 
   registry.register('wait-for', async (args) => {
