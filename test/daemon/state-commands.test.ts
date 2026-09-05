@@ -432,8 +432,11 @@ describe('a stream dying mid-wait ends the wait promptly', () => {
 })
 
 
-describe('a replaced stream cannot retire a live capture', () => {
-  it('a late exit from an already-replaced stream does not end a pending wait', async () => {
+describe('captures are isolated from one another', () => {
+  // Note this does NOT exercise Capture's own wasCurrent guard: detach deletes
+  // the Capture, so re-attaching builds a fresh one with an empty handler set.
+  // The guard's regression test lives in test/state/capture.test.ts.
+  it('a dead stream from a previous capture does not end a wait on the current one', async () => {
     const { call, dieOn, emitOn, wire, streamer } = build()
     await call('state-attach')
     await call('state-detach')
@@ -447,5 +450,31 @@ describe('a replaced stream cannot retire a live capture', () => {
     dieOn(0, 1)
     emitOn(1, wire(1, 'state', 'auth', 'true'))
     expect(await pending).toMatchObject({ ok: true })
+  })
+})
+
+
+describe('detaching while a wait is pending', () => {
+  // Behaviour introduced by onEnd, and worth pinning: detach removes the
+  // capture from the manager, so a wait left running would be unresolvable
+  // until its own deadline. Ending it at once is both correct and kinder.
+  it('ends the wait at once rather than leaving it to time out', async () => {
+    const { call } = build()
+    await call('state-attach')
+    const started = Date.now()
+    const pending = call('wait-for-state', { predicate: 'auth=true', timeoutMs: 5000 })
+    setTimeout(() => void call('state-detach'), 20)
+    expect(await pending).toMatchObject({ ok: false, error: { error: 'E_NOT_ATTACHED' } })
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('ends a pending event wait too', async () => {
+    const { call } = build()
+    await call('state-attach')
+    const started = Date.now()
+    const pending = call('wait-for-event', { name: 'checkout.success', timeoutMs: 5000 })
+    setTimeout(() => void call('state-detach'), 20)
+    expect(await pending).toMatchObject({ ok: false, error: { error: 'E_NOT_ATTACHED' } })
+    expect(Date.now() - started).toBeLessThan(1000)
   })
 })

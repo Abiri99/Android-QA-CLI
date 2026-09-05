@@ -145,6 +145,12 @@ export class Capture {
     this.stopping = true
     this.stream?.stop()
     this.stream = null
+    // Notify here rather than leaving it to the stream's own exit: `stop()`
+    // clears `this.stream` immediately, so by the time the real exit lands the
+    // `wasCurrent` guard suppresses it. Without this a wait pending across a
+    // detach would sit until its own deadline for a capture that is already
+    // gone and can never satisfy it.
+    this.notifyEnd()
   }
 
   stats(): CaptureStats {

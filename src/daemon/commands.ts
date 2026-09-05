@@ -114,7 +114,6 @@ function keyNameArg(args: Record<string, unknown>): KeyName {
 /**
  * Returns an error when the device's capture stream has died, or null while it
  * is healthy.
-
  *
  * A wait cannot distinguish "the condition is false" from "we stopped receiving
  * lines" unless it asks. Reporting a blind wait as `E_TIMEOUT` is the failure
@@ -125,13 +124,6 @@ function keyNameArg(args: Record<string, unknown>): KeyName {
  * identical to never having attached — run `agentqa state attach`, which
  * restarts a dead capture.
  */
-function captureEndedError(capture: Capture, serial: string): AgentQaError {
-  return (
-    deadCaptureError(capture, serial) ??
-    new AgentQaError('E_NOT_ATTACHED', `the capture stream for ${serial} ended`, { serial })
-  )
-}
-
 function deadCaptureError(capture: Capture, serial: string): AgentQaError | null {
   const stats = capture.stats()
   if (stats.running) return null
@@ -139,6 +131,22 @@ function deadCaptureError(capture: Capture, serial: string): AgentQaError | null
     'E_NOT_ATTACHED',
     `the capture stream for ${serial} has stopped (adb exited with ${stats.lastExitCode ?? 'no code'}), so nothing further could be observed and this wait was blind; run \`agentqa state attach\` to restart it`,
     { serial, lastExitCode: stats.lastExitCode, running: false },
+  )
+}
+
+/**
+ * The error a wait rejects with when its capture's stream ends beneath it.
+ *
+ * Always returns an error, never null: `onEnd` only fires for the stream a
+ * capture currently holds, and that stream is cleared before subscribers run,
+ * so `deadCaptureError` is non-null by the time this is called. The fallback is
+ * defensive — it exists so this function can promise a value rather than make
+ * every call site handle a null that cannot occur.
+ */
+function captureEndedError(capture: Capture, serial: string): AgentQaError {
+  return (
+    deadCaptureError(capture, serial) ??
+    new AgentQaError('E_NOT_ATTACHED', `the capture stream for ${serial} ended`, { serial })
   )
 }
 
