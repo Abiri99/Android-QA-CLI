@@ -35,7 +35,15 @@ export async function startDaemon(version: string): Promise<DaemonServer> {
     checkpoints,
     notifierFor: (config) => (config.notify ? new MacNotifier() : new NullNotifier()),
   })
-  registerCommands(registry, drivers, adb, new RefStore(), captures, guard, checkpoints)
+  registerCommands(registry, drivers, adb, new RefStore(), captures, guard, checkpoints, (root) => {
+    // A project whose config has since gone missing must not fail a `deeplink`
+    // that named no application id: unscoped is what it would have been anyway.
+    try {
+      return configs.forRoot(root).applicationId
+    } catch {
+      return undefined
+    }
+  })
   registerAuthCommands(registry, { drivers, adb, captures, configs, checkpoints })
   const server = new DaemonServer(registry, version)
   await server.listen(daemonSocketPath())

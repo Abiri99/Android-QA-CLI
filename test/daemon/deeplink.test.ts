@@ -12,13 +12,16 @@ import type { AdbRunner } from '../../src/adb/runner.js'
 
 const SERIAL = 'emulator-5554'
 
-function build() {
+function build(
+  amOutput = 'Starting: Intent { act=android.intent.action.VIEW }',
+  applicationIdFor?: (root: string) => string | undefined,
+) {
   const calls: string[][] = []
   const adb: AdbRunner = {
     async text(args) {
       if (args[0] === 'devices') return `List of devices attached\n${SERIAL}\tdevice\n`
       calls.push(args)
-      return 'Starting: Intent { act=android.intent.action.VIEW }'
+      return amOutput
     },
     async binary() { return Buffer.alloc(0) },
   }
@@ -32,9 +35,13 @@ function build() {
     new CaptureManager(new FakeStreamer()),
     undefined,
     checkpoints,
+    applicationIdFor,
   )
   return { call: callFor(registry), calls, checkpoints }
 }
+
+const UNRESOLVED =
+  'Starting: Intent { act=android.intent.action.VIEW dat=example://cart }\nError: Activity not started, unable to resolve Intent'
 
 describe('deeplink', () => {
   it('starts a VIEW intent for the uri', async () => {
@@ -80,6 +87,47 @@ describe('deeplink', () => {
     expect(before).toBeTruthy()
     await call('deeplink', { uri: 'example://cart' })
     await expect(call('tap', { target: '#1' })).rejects.toThrow()
+  })
+
+  it('does not remember a link whose am start resolved nothing', async () => {
+    // `am start` exits 0 while printing this. Remembering the link would let a
+    // later checkpoint replay a navigation that never happened.
+    const { call, checkpoints } = build(UNRESOLVED)
+    const result = (await call('deeplink', { uri: 'example://cart' })) as { resolved: boolean }
+    expect(result.resolved).toBe(false)
+    checkpoints.record({ serial: SERIAL, screen: null, deeplink: null, gate: 'login', at: 1 })
+    expect(checkpoints.get(SERIAL)?.deeplink).toBeNull()
+  })
+
+  it('reports resolved: true for an am start that actually started something', async () => {
+    const { call } = build()
+    const result = (await call('deeplink', { uri: 'example://cart' })) as { resolved: boolean }
+    expect(result.resolved).toBe(true)
+  })
+
+  it('falls back to the project application id, so a replay builds the same intent', async () => {
+    // The resume path scopes with `config.applicationId` while this command
+    // scoped only with `--application-id`. Independent sources meant a replay
+    // could add or drop `-p` relative to the navigation it reproduces.
+    const { call, calls } = build(undefined, () => 'com.example.app')
+    await call('deeplink', { uri: 'example://cart', projectRoot: '/p' })
+    expect(calls[0]).toContain('-p')
+    expect(calls[0]).toContain('com.example.app')
+  })
+
+  it('prefers an explicit --application-id over the project default', async () => {
+    const { call, calls } = build(undefined, () => 'com.example.app')
+    await call('deeplink', {
+      uri: 'example://cart', projectRoot: '/p', applicationId: 'com.example.other',
+    })
+    expect(calls[0]!.join(' ')).toContain('com.example.other')
+    expect(calls[0]!.join(' ')).not.toContain('com.example.app')
+  })
+
+  it('stays unscoped outside a project, rather than failing', async () => {
+    const { call, calls } = build(undefined, () => 'com.example.app')
+    await call('deeplink', { uri: 'example://cart' })
+    expect(calls[0]).not.toContain('-p')
   })
 
   it('rejects a uri with no scheme rather than starting a meaningless intent', async () => {

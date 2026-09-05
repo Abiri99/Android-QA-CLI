@@ -22,21 +22,22 @@ function element(text: string): ScreenElement {
   }
 }
 
-function fakeAdb(calls: string[][] = []): AdbRunner {
+function fakeAdb(calls: string[][] = [], amOutput = ''): AdbRunner {
   return {
     async text(args) {
       if (args[0] === 'devices') return `List of devices attached\n${SERIAL}\tdevice\n`
       calls.push(args)
-      return ''
+      if (amOutput === 'THROW') throw new Error('adb: device offline')
+      return amOutput
     },
     async binary() { return Buffer.alloc(0) },
   }
 }
 
-function build(gates: GateConfig[], screen: ScreenElement[] = []) {
+function build(gates: GateConfig[], screen: ScreenElement[] = [], amOutput = '') {
   const registry = new CommandRegistry()
   const calls: string[][] = []
-  const adb = fakeAdb(calls)
+  const adb = fakeAdb(calls, amOutput)
   const driver = new FakeDriver({ elements: screen })
   const drivers = new DriverRegistry(adb, () => driver)
   const captures = new CaptureManager(new FakeStreamer())
@@ -310,6 +311,45 @@ describe('auth-wait', () => {
       })) as { cleared: boolean; resumed: string }
       expect(result.cleared).toBe(true)
       expect(result.resumed).toBe('no-checkpoint')
+    })
+
+    it('reports resumed: failed when am start resolved no activity', async () => {
+      // `am start` exits 0 while printing this. Returning `resumed: deeplink`
+      // tells the agent it is back on the checkout screen while the device
+      // sits wherever authentication left it.
+      const { call, captures, checkpoints } = build(
+        [LOGIN],
+        [],
+        'Starting: Intent { act=android.intent.action.VIEW dat=example://checkout }\nError: Activity not started, unable to resolve Intent',
+      )
+      const capture = captures.attach(SERIAL)
+      capture.projection.apply({ kind: 'state', key: 'auth', payload: '{"authenticated":true}', seq: 1 })
+      checkpoints.record({
+        serial: SERIAL, screen: 'Checkout', deeplink: 'example://checkout', gate: 'login', at: 1,
+      })
+      const result = (await call('auth-wait', {
+        projectRoot: '/p', gate: 'login', timeout: '5m', resumeTo: 'checkpoint',
+      })) as { cleared: boolean; resumed: string; resumeOutput?: string }
+      // The wait itself still succeeded: the gate genuinely cleared. Only the
+      // return trip failed, and that is reported rather than thrown.
+      expect(result.cleared).toBe(true)
+      expect(result.resumed).toBe('failed')
+      expect(result.resumeOutput).toContain('unable to resolve Intent')
+    })
+
+    it('reports resumed: failed rather than failing the wait when adb itself throws', async () => {
+      const { call, captures, checkpoints } = build([LOGIN], [], 'THROW')
+      const capture = captures.attach(SERIAL)
+      capture.projection.apply({ kind: 'state', key: 'auth', payload: '{"authenticated":true}', seq: 1 })
+      checkpoints.record({
+        serial: SERIAL, screen: 'Checkout', deeplink: 'example://checkout', gate: 'login', at: 1,
+      })
+      const result = (await call('auth-wait', {
+        projectRoot: '/p', gate: 'login', timeout: '5m', resumeTo: 'checkpoint',
+      })) as { cleared: boolean; resumed: string; resumeOutput?: string }
+      expect(result.cleared).toBe(true)
+      expect(result.resumed).toBe('failed')
+      expect(result.resumeOutput).toContain('device offline')
     })
 
     it('rejects a --resume-to value other than checkpoint, naming the accepted value', async () => {

@@ -166,6 +166,19 @@ function captureEndedError(capture: Capture, serial: string): AgentQaError {
 }
 
 /**
+ * Whether an `am start` reported that it started nothing.
+ *
+ * `am start` exits 0 while printing `Error: Activity not started, unable to
+ * resolve Intent` for a link the app no longer handles, so a zero exit status
+ * is not evidence a navigation happened. Reporting one anyway is a successful
+ * side effect assumed to have had its intended effect — the agent believes it
+ * is on the checkout screen while the device sits wherever it was.
+ */
+export function intentResolutionFailed(output: string): boolean {
+  return /\bError:|unable to resolve/i.test(output)
+}
+
+/**
  * The `am start` argv for a `VIEW` intent against a deep link, shared between
  * the `deeplink` command (below) and `auth-wait --resume-to checkpoint`'s
  * replay of a remembered one — the same intent, built from two different
@@ -194,6 +207,15 @@ export function registerCommands(
   captures: CaptureManager,
   guard?: GateGuard,
   checkpoints?: CheckpointStore,
+  /**
+   * The project's `application_id`, for a `deeplink` the CLI did not scope
+   * explicitly. Without it the `deeplink` command and `auth wait --resume-to
+   * checkpoint`'s replay of the same link build different intents — one with
+   * `-p`, one without — so a replay does not reproduce the navigation it
+   * claims to. A function rather than the config registry, so the command
+   * layer keeps no dependency on config loading.
+   */
+  applicationIdFor?: (projectRoot: string) => string | undefined,
 ): void {
   /**
    * Runs before a mutating command acts. An open gate throws here, having done
@@ -346,15 +368,25 @@ export function registerCommands(
     }
     const device = await selectDevice(adb, serialArg(args))
     await requireNoGate(device.serial, args)
-    const applicationId = stringOptArg(args, 'applicationId')
+    const projectRoot = typeof args.projectRoot === 'string' ? args.projectRoot : undefined
+    // Falls back to the project's application_id so this builds the same intent
+    // the checkpoint replay does.
+    const applicationId =
+      stringOptArg(args, 'applicationId') ??
+      (projectRoot === undefined ? undefined : applicationIdFor?.(projectRoot))
     const command = deeplinkIntentArgs(uri, applicationId)
     try {
       const output = await adb.text(command, { serial: device.serial })
-      checkpoints?.noteDeeplink(device.serial, uri)
+      const resolved = !intentResolutionFailed(output)
+      // Only a link that actually resolved is worth remembering: a checkpoint
+      // that replays one which started nothing returns to nowhere, and says it
+      // returned somewhere.
+      if (resolved) checkpoints?.noteDeeplink(device.serial, uri)
       return {
         ok: true,
         serial: device.serial,
         uri,
+        resolved,
         output: output.trim(),
         ...(await gateAfter(device.serial, args)),
       }

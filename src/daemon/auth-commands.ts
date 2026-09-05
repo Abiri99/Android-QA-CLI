@@ -4,7 +4,7 @@ import { AgentQaError, isAgentQaError } from '../core/errors.js'
 import { parseDuration } from '../core/duration.js'
 import type { CommandRegistry } from './server.js'
 import type { DriverRegistry } from './commands.js'
-import { deadCaptureError, deeplinkIntentArgs } from './commands.js'
+import { deadCaptureError, deeplinkIntentArgs, intentResolutionFailed } from './commands.js'
 import type { CaptureManager } from '../state/capture.js'
 import type { ConfigRegistry } from '../config/registry.js'
 import { evaluateGate, evaluateAny } from '../auth/evaluate.js'
@@ -259,9 +259,32 @@ export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps):
           const cp = deps.checkpoints.get(device.serial)
           if (cp?.deeplink) {
             const config = deps.configs.forRoot(projectRoot)
-            await deps.adb.text(deeplinkIntentArgs(cp.deeplink, config.applicationId), {
-              serial: device.serial,
-            })
+            // Re-checked rather than assumed, exactly as an automatic gate
+            // resolution re-evaluates instead of trusting that `emu finger
+            // touch` worked: `am start` exits 0 while printing `Error:
+            // Activity not started, unable to resolve Intent`, so a completed
+            // adb call is not evidence the app navigated anywhere.
+            //
+            // Never throws. A failed resume is information, not a reason to
+            // fail an `auth wait` whose gate genuinely cleared — the wait
+            // succeeded, the return trip did not, and the agent needs to be
+            // told which.
+            let output: string
+            try {
+              output = await deps.adb.text(deeplinkIntentArgs(cp.deeplink, config.applicationId), {
+                serial: device.serial,
+              })
+            } catch (e) {
+              return {
+                ...cleared,
+                resumed: 'failed',
+                resumeOutput: e instanceof Error ? e.message : String(e),
+                checkpoint: cp,
+              }
+            }
+            if (intentResolutionFailed(output)) {
+              return { ...cleared, resumed: 'failed', resumeOutput: output.trim(), checkpoint: cp }
+            }
             return { ...cleared, resumed: 'deeplink', checkpoint: cp }
           }
           // No deep link to replay. Say what the checkpoint was and that we did
