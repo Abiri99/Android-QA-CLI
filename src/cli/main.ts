@@ -459,7 +459,9 @@ export async function main(
 
   const auth = program.command('auth').description('authentication gates')
 
-  const renderGates = (data: { gates: GateReport[]; blocking: string | null }): string => {
+  type GateSummary = { gates: GateReport[]; blocking: string | null; unevaluable: string[] }
+
+  const renderGates = (data: GateSummary): string => {
     if (data.gates.length === 0) return '(no auth gates configured)'
     const lines = data.gates.map((g) => {
       const mark = g.open === 'yes' ? 'OPEN' : g.open === 'no' ? 'ok' : '?'
@@ -469,6 +471,15 @@ export async function main(
       return `${mark.padEnd(5)} ${g.name}  ${g.kind}${how}${hint}${auto}`
     })
     if (data.blocking) lines.push('', `blocked by: ${data.blocking}`)
+    // Said in words, not left to be inferred from the `?` marks. "No gate is
+    // open" and "no gate could be evaluated" are different answers, and only
+    // one of them means the caller is safe to proceed.
+    if (data.unevaluable.length > 0) {
+      lines.push(
+        '',
+        `not evaluated: ${data.unevaluable.join(', ')} — these gates could not be evaluated, so this is not a report that you are unblocked`,
+      )
+    }
     return lines.join('\n')
   }
 
@@ -482,8 +493,12 @@ export async function main(
       const data = (await client.request('auth-status', {
         serial: opts.device,
         projectRoot: projectRoot(opts.project),
-      })) as { gates: GateReport[]; blocking: string | null }
+      })) as GateSummary
       emit(data, () => renderGates(data), jsonMode(opts), out)
+      // Deliberately no non-zero exit for unevaluable gates here: `auth status`
+      // is the cheap, no-round-trip view and is expected to report unknowns
+      // routinely. Only `auth check`, which forces the screen read, claims to
+      // have actually looked.
     })
 
   auth
@@ -496,9 +511,13 @@ export async function main(
       const data = (await client.request('auth-check', {
         serial: opts.device,
         projectRoot: projectRoot(opts.project),
-      })) as { gates: GateReport[]; blocking: string | null }
+      })) as GateSummary
       emit(data, () => renderGates(data), jsonMode(opts), out)
-      if (data.blocking) exitCode = 1
+      // Exit 0 has to mean "I checked, and you are not blocked". An all-unknown
+      // result is not that, so it exits non-zero too — the exit code's job is
+      // to stop a script that would otherwise proceed into a flow it may be
+      // locked out of. A caller that needs the two apart reads the JSON.
+      if (data.blocking || data.unevaluable.length > 0) exitCode = 1
     })
 
   auth

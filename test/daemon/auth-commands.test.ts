@@ -118,6 +118,16 @@ describe('auth-status', () => {
     expect(result.gates.map((g) => g.needsScreen)).toEqual([false, true])
   })
 
+  it('reports unevaluable gates too, without that being an error for status', async () => {
+    // `auth status` is the cheap view and reports unknowns routinely, so it
+    // carries the same field — the CLI just does not exit non-zero on it.
+    const { call } = build([LOGIN_STATE], [])
+    const result = (await call('auth-status', { projectRoot: '/p' })) as {
+      unevaluable: string[]
+    }
+    expect(result.unevaluable).toEqual(['login'])
+  })
+
   it('reports a state gate as open once the projection says so', async () => {
     const { call, captures } = build([LOGIN_STATE], [])
     const capture = captures.attach(SERIAL)
@@ -160,8 +170,37 @@ describe('auth-check', () => {
     const { call } = build([STEP_UP_UI], [element('Home')])
     const result = (await call('auth-check', { projectRoot: '/p' })) as {
       blocking: string | null
+      unevaluable: string[]
     }
     expect(result.blocking).toBeNull()
+    // A genuinely-closed gate is evaluable: nothing goes in `unevaluable`, so
+    // this is the case where exit 0 really does mean "not blocked".
+    expect(result.unevaluable).toEqual([])
+  })
+
+  it('names every unevaluable gate rather than collapsing unknown into blocking null', async () => {
+    // State gates with no capture attached: `blocking` is null because nothing
+    // is KNOWN to be open, but every gate reads `unknown`. Reporting only
+    // `blocking: null` here is the confident wrong answer.
+    const { call } = build([LOGIN_STATE, { ...LOGIN_STATE, name: 'pin' }], [])
+    const result = (await call('auth-check', { projectRoot: '/p' })) as {
+      gates: { open: string }[]
+      blocking: string | null
+      unevaluable: string[]
+    }
+    expect(result.gates.map((g) => g.open)).toEqual(['unknown', 'unknown'])
+    expect(result.blocking).toBeNull()
+    expect(result.unevaluable).toEqual(['login', 'pin'])
+  })
+
+  it('leaves unevaluable empty when a gate is open, since an open gate was evaluated', async () => {
+    const { call } = build([STEP_UP_UI], [element("Confirm it's you")])
+    const result = (await call('auth-check', { projectRoot: '/p' })) as {
+      blocking: string | null
+      unevaluable: string[]
+    }
+    expect(result.blocking).toBe('step_up')
+    expect(result.unevaluable).toEqual([])
   })
 
   it('skips the screen read entirely when no gate needs one', async () => {

@@ -150,12 +150,28 @@ function isAutomatable(gate: Gate, serial: string): boolean {
   return gate.kind === 'otp_sms' && gate.autoSmsBody !== undefined
 }
 
+export interface EvaluateAllResult {
+  gates: GateReport[]
+  /** A gate known to be open, or null when none is. */
+  blocking: string | null
+  /**
+   * Gates whose `open` verdict came back `unknown`.
+   *
+   * `blocking` alone flattens `unknown` and `no` into the same answer, and the
+   * caller that reads only `blocking: null` then concludes "not blocked" from
+   * a payload in which every gate says it could not be evaluated. Reported
+   * separately so `auth check` can exit non-zero on it (spec 7.5: unknown,
+   * never a guess).
+   */
+  unevaluable: string[]
+}
+
 export async function evaluateAll(
   deps: AuthDeps,
   serial: string,
   projectRoot: string,
   readScreen: boolean,
-): Promise<{ gates: GateReport[]; blocking: string | null }> {
+): Promise<EvaluateAllResult> {
   const gates = deps.configs.gatesForRoot(projectRoot)
   const ctx = await gateContext(deps, serial, gates, readScreen)
   const reports = gates.map((g) => ({
@@ -164,7 +180,11 @@ export async function evaluateAll(
     automatable: isAutomatable(g, serial),
   }))
   const open = reports.find((r) => r.open === 'yes')
-  return { gates: reports, blocking: open ? open.name : null }
+  return {
+    gates: reports,
+    blocking: open ? open.name : null,
+    unevaluable: reports.filter((r) => r.open === 'unknown').map((r) => r.name),
+  }
 }
 
 export function registerAuthCommands(registry: CommandRegistry, deps: AuthDeps): void {
