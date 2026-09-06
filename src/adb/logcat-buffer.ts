@@ -12,10 +12,27 @@ import type { AdbRunner } from './runner.js'
 export const LOGCAT_BUFFER_SIZE = '16M'
 
 export interface BufferResult {
-  grown: boolean
-  /** The size requested, when it was accepted. */
-  size?: string
-  /** What adb said, when it was not. */
+  /**
+   * Whether adb accepted the resize request.
+   *
+   * Deliberately NOT "the buffer is now this size". `logcat -G` caps the
+   * request to the kernel logger's maximum on some devices and exits 0 saying
+   * nothing, so treating silence as proof of 16M would be a confident wrong
+   * answer in the one field whose job is to tell the truth about the buffer.
+   * `report` carries what the device actually says.
+   */
+  accepted: boolean
+  /** The size asked for, when the request was accepted. */
+  requested?: string
+  /**
+   * `logcat -g`'s own description of the buffers, verbatim and unparsed.
+   *
+   * Evidence rather than a claim: its format varies by platform, and parsing
+   * it blind to produce a number would be inventing precision we do not have.
+   * Absent when the read-back itself failed, which does not undo the resize.
+   */
+  report?: string
+  /** What adb said when it refused the resize, when it did. */
   reason?: string
 }
 
@@ -23,7 +40,8 @@ export interface BufferResult {
 const FAILED = /fail|invalid|unknown|error|not supported/i
 
 /**
- * Grows the device's logcat ring buffer.
+ * Grows the device's logcat ring buffer, and reads back what the device
+ * actually ended up with.
  *
  * **Never throws.** This runs on the way to attaching a capture, and a device
  * that caps the buffer size, an older platform without `-G`, or a restricted
@@ -31,7 +49,8 @@ const FAILED = /fail|invalid|unknown|error|not supported/i
  * better than not reading one. The outcome is returned rather than raised, so
  * the caller can record it — `state stats` reports it, because a run that is
  * dropping more than expected should be able to say the buffer was never
- * grown rather than leave someone guessing.
+ * grown rather than leave someone hunting the app for a fault that is not
+ * there.
  */
 export async function growLogcatBuffer(
   adb: AdbRunner,
@@ -45,9 +64,21 @@ export async function growLogcatBuffer(
       // would report a resize that never happened.
       includeStderr: true,
     })
-    if (FAILED.test(output)) return { grown: false, reason: output.trim() }
-    return { grown: true, size }
+    if (FAILED.test(output)) return { accepted: false, reason: output.trim() }
   } catch (e) {
-    return { grown: false, reason: e instanceof Error ? e.message : String(e) }
+    return { accepted: false, reason: e instanceof Error ? e.message : String(e) }
+  }
+
+  // Separate try: a read-back that fails says nothing about the resize, which
+  // adb already accepted. Losing the evidence is worth much less than
+  // reporting a resize that did happen as one that did not.
+  try {
+    const report = await adb.text(['logcat', '-g'], { serial, includeStderr: true })
+    const trimmed = report.trim()
+    return trimmed.length > 0
+      ? { accepted: true, requested: size, report: trimmed }
+      : { accepted: true, requested: size }
+  } catch {
+    return { accepted: true, requested: size }
   }
 }

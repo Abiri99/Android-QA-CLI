@@ -438,7 +438,7 @@ export function registerCommands(
     const buffer = await growLogcatBuffer(adb, device.serial)
     const capture = captures.attach(device.serial)
     capture.noteBufferResult(buffer)
-    return { ok: true, serial: device.serial, bufferGrown: buffer.grown }
+    return { ok: true, serial: device.serial, buffer }
   })
 
   registry.register('state-detach', async (args) => {

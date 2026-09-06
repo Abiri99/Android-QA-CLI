@@ -21,17 +21,23 @@ export interface CaptureStats {
   /** Exit code of the last `adb logcat` that ended, or null if none has. */
   lastExitCode: number | null
   /**
-   * Whether the device's logcat ring buffer was grown for this capture, or
-   * null when nothing has tried.
+   * Whether adb accepted a request to grow the logcat ring buffer for this
+   * capture, or null when nothing has tried.
    *
    * Reported because a small buffer drops lines, every dropped line reads as a
    * gap, and every gap marks values stale — so a run answering `unknown` more
    * than expected should be able to see that the buffer was never grown rather
    * than leave someone hunting the app for a fault that is not there.
+   *
+   * `true` means the request was accepted, NOT that the buffer is that size:
+   * some devices cap it to the kernel logger's maximum and say nothing.
+   * `bufferReport` is what the device itself says.
    */
-  bufferGrown: boolean | null
-  /** The size that was accepted, when one was. */
-  bufferSize: string | null
+  bufferAccepted: boolean | null
+  /** The size asked for, when a request was accepted. */
+  bufferRequested: string | null
+  /** `logcat -g`'s own description of the buffers, verbatim and unparsed. */
+  bufferReport: string | null
   /** What adb said when it refused, when it did. */
   bufferReason: string | null
 }
@@ -189,8 +195,9 @@ export class Capture {
       restarts: this.restartCount,
       running: this.stream !== null,
       lastExitCode: this.lastExitCode,
-      bufferGrown: this.buffer === null ? null : this.buffer.grown,
-      bufferSize: this.buffer?.size ?? null,
+      bufferAccepted: this.buffer === null ? null : this.buffer.accepted,
+      bufferRequested: this.buffer?.requested ?? null,
+      bufferReport: this.buffer?.report ?? null,
       bufferReason: this.buffer?.reason ?? null,
     }
   }

@@ -35,7 +35,9 @@ function build(
       // every lifecycle command, and letting it consume a slot from
       // `responses` would make each test's fixture depend on whether the
       // command under test happens to attach.
+      // Both the resize and its read-back, so neither consumes a slot.
       if (args[0] === 'logcat' && args[1] === '-G') return logcatG
+      if (args[0] === 'logcat' && args[1] === '-g') return 'main: ring buffer is 16 MiB'
       return responses[n++] ?? 'Success\n'
     },
     async binary() {

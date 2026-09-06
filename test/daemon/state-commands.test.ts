@@ -10,7 +10,7 @@ import { FakeStreamer } from '../helpers/fake-stream.js'
 const adb: AdbRunner = {
   async text(args) {
     if (args[0] === 'devices') return 'List of devices attached\nemulator-5554  device\n'
-    if (args[0] === 'logcat' && args[1] === '-G') return ''
+    if (args[0] === 'logcat' && (args[1] === '-G' || args[1] === '-g')) return ''
     throw new Error(`unexpected adb call: ${args.join(' ')}`)
   },
   async binary() { return Buffer.alloc(0) },
@@ -24,6 +24,7 @@ function build(opts: { logcatG?: string } = {}) {
       if (args[0] === 'logcat' && args[1] === '-G' && opts.logcatG !== undefined) {
         return opts.logcatG
       }
+      if (args[0] === 'logcat' && args[1] === '-g') return 'main: ring buffer is 16 MiB'
       return adb.text(args, o)
     },
     async binary() { return Buffer.alloc(0) },
@@ -480,8 +481,8 @@ describe('growing the logcat buffer on attach', () => {
   it('reports the outcome through state stats', async () => {
     const { call } = build()
     await call('state-attach', {})
-    const res = (await call('state-stats', {})) as { data: { bufferGrown: boolean | null } }
-    expect(res.data.bufferGrown).toBe(true)
+    const res = (await call('state-stats', {})) as { data: { bufferAccepted: boolean | null } }
+    expect(res.data.bufferAccepted).toBe(true)
   })
 
   it('still attaches when the resize fails', async () => {
@@ -490,9 +491,9 @@ describe('growing the logcat buffer on attach', () => {
     const { call } = build({ logcatG: 'failed to set buffer size: Invalid argument' })
     expect((await call('state-attach', {})).ok).toBe(true)
     const res = (await call('state-stats', {})) as {
-      data: { bufferGrown: boolean | null; bufferReason: string | null }
+      data: { bufferAccepted: boolean | null; bufferReason: string | null }
     }
-    expect(res.data.bufferGrown).toBe(false)
+    expect(res.data.bufferAccepted).toBe(false)
     expect(res.data.bufferReason).toContain('Invalid argument')
   })
 })
