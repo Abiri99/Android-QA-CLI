@@ -1,6 +1,7 @@
 import { AgentQaError } from '../core/errors.js'
 import type { AdbStream, AdbStreamer } from '../adb/stream.js'
 import { parseWireLine, WIRE_TAG } from './wire.js'
+import type { BufferResult } from '../adb/logcat-buffer.js'
 import { Reassembler } from './reassemble.js'
 import { Projection } from './projection.js'
 
@@ -19,6 +20,20 @@ export interface CaptureStats {
   running: boolean
   /** Exit code of the last `adb logcat` that ended, or null if none has. */
   lastExitCode: number | null
+  /**
+   * Whether the device's logcat ring buffer was grown for this capture, or
+   * null when nothing has tried.
+   *
+   * Reported because a small buffer drops lines, every dropped line reads as a
+   * gap, and every gap marks values stale — so a run answering `unknown` more
+   * than expected should be able to see that the buffer was never grown rather
+   * than leave someone hunting the app for a fault that is not there.
+   */
+  bufferGrown: boolean | null
+  /** The size that was accepted, when one was. */
+  bufferSize: string | null
+  /** What adb said when it refused, when it did. */
+  bufferReason: string | null
 }
 
 /**
@@ -39,6 +54,7 @@ export class Capture {
   private restartCount = 0
   private chunkSpan = 0
   private lastExitCode: number | null = null
+  private buffer: BufferResult | null = null
   private stopping = false
   private endHandlers = new Set<() => void>()
 
@@ -153,6 +169,18 @@ export class Capture {
     this.notifyEnd()
   }
 
+  /**
+   * Records what a logcat buffer resize did, for `state stats` to report.
+   *
+   * Set by whoever attached rather than by `Capture` itself: `Capture` holds an
+   * `AdbStreamer` and has no way to run a one-shot adb command, and giving it
+   * one to reach a single call would be a worse trade than passing the answer
+   * in.
+   */
+  noteBufferResult(result: BufferResult): void {
+    this.buffer = result
+  }
+
   stats(): CaptureStats {
     return {
       lines: this.lineCount,
@@ -161,6 +189,9 @@ export class Capture {
       restarts: this.restartCount,
       running: this.stream !== null,
       lastExitCode: this.lastExitCode,
+      bufferGrown: this.buffer === null ? null : this.buffer.grown,
+      bufferSize: this.buffer?.size ?? null,
+      bufferReason: this.buffer?.reason ?? null,
     }
   }
 }

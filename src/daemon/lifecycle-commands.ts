@@ -1,6 +1,7 @@
 import { selectDevice } from '../adb/devices.js'
 import type { AdbRunner } from '../adb/runner.js'
 import { clearAppData, forceStop, installApk, launchApp } from '../adb/lifecycle.js'
+import { growLogcatBuffer } from '../adb/logcat-buffer.js'
 import { AgentQaError } from '../core/errors.js'
 import type { CaptureManager } from '../state/capture.js'
 import type { CommandRegistry } from './server.js'
@@ -133,7 +134,15 @@ export function registerLifecycleCommands(
     // having state captured before the launch thrown away.
     const alreadyAttached = deps.captures.get(device.serial) !== undefined
     const attached = attach && !alreadyAttached
-    if (attached) deps.captures.attach(device.serial)
+    if (attached) {
+      // Same terms as `state attach`: grown before the stream reads, never
+      // fatal, and the outcome recorded so `state stats` can attribute a lossy
+      // run to a small buffer. Only when THIS launch attaches — an
+      // already-attached capture had its buffer grown when it was attached,
+      // and a second attempt would overwrite the result it recorded then.
+      const buffer = await growLogcatBuffer(deps.adb, device.serial)
+      deps.captures.attach(device.serial).noteBufferResult(buffer)
+    }
 
     try {
       const result = await launchApp(deps.adb, device.serial, applicationId, activity)

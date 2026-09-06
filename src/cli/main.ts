@@ -419,6 +419,9 @@ export async function main(
         running: boolean
         hasGap: boolean
         lastExitCode: number | null
+        bufferGrown: boolean | null
+        bufferSize: string | null
+        bufferReason: string | null
       }
       emit(
         data,
@@ -427,7 +430,12 @@ export async function main(
           `pid=${data.pid ?? '-'} restarts=${data.restarts} gap=${data.hasGap}` +
           // Only when there is one to report: a dead stream is why the values
           // suddenly read stale, and this is the evidence for it.
-          (data.lastExitCode === null ? '' : ` lastExit=${data.lastExitCode}`),
+          (data.lastExitCode === null ? '' : ` lastExit=${data.lastExitCode}`) +
+          // Likewise: a buffer that was never grown is why a run drops more
+          // lines than expected, and without this the reader is left hunting
+          // the app for a fault that is not there.
+          (data.bufferGrown === true ? ` buffer=${data.bufferSize ?? 'grown'}` : '') +
+          (data.bufferGrown === false ? ' buffer=NOT GROWN' : ''),
         jsonMode(opts),
         out,
       )

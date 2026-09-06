@@ -311,3 +311,25 @@ describe('Capture.onEnd', () => {
     expect(ended).toBe(0)
   })
 })
+
+describe('logcat buffer outcome', () => {
+  it('reports unknown before anything has said otherwise', () => {
+    // Never assume it was grown: a caller that skipped the resize, or a
+    // daemon that predates it, must not read as a 16M buffer.
+    const cap = new Capture(new FakeStreamer(), 'x')
+    expect(cap.stats().bufferGrown).toBeNull()
+  })
+
+  it('records that the buffer was grown', () => {
+    const cap = new Capture(new FakeStreamer(), 'x')
+    cap.noteBufferResult({ grown: true, size: '16M' })
+    expect(cap.stats()).toMatchObject({ bufferGrown: true, bufferSize: '16M' })
+  })
+
+  it('records why it was not, so a lossy run can say the buffer is small', () => {
+    const cap = new Capture(new FakeStreamer(), 'x')
+    cap.noteBufferResult({ grown: false, reason: 'Invalid argument' })
+    expect(cap.stats()).toMatchObject({ bufferGrown: false })
+    expect(cap.stats().bufferReason).toContain('Invalid argument')
+  })
+})

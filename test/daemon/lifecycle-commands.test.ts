@@ -20,13 +20,22 @@ function apk(): string {
   return path
 }
 
-function build(responses: string[] = [], applicationId: string | undefined = PKG) {
+function build(
+  responses: string[] = [],
+  applicationId: string | undefined = PKG,
+  logcatG = '',
+) {
   const calls: string[][] = []
   let n = 0
   const adb: AdbRunner = {
     async text(args) {
       if (args[0] === 'devices') return `List of devices attached\n${SERIAL}\tdevice\n`
       calls.push(args)
+      // Answered by name, not by position: the buffer resize is incidental to
+      // every lifecycle command, and letting it consume a slot from
+      // `responses` would make each test's fixture depend on whether the
+      // command under test happens to attach.
+      if (args[0] === 'logcat' && args[1] === '-G') return logcatG
       return responses[n++] ?? 'Success\n'
     },
     async binary() {
@@ -251,5 +260,41 @@ describe('launch reports whether it actually attached', () => {
     }
     expect(result.alreadyAttached).toBe(true)
     expect(result.attached).toBe(false)
+  })
+})
+
+describe('launch grows the logcat buffer when it attaches', () => {
+  it('resizes before starting the app, on the same terms as state attach', async () => {
+    const { call, calls } = build([`${PKG}/.MainActivity\n`, 'Starting: Intent { }\n'])
+    await call('launch', { projectRoot: '/p' })
+    expect(calls.some((a) => a[0] === 'logcat' && a[1] === '-G')).toBe(true)
+  })
+
+  it('does not resize when it is not attaching', async () => {
+    // --no-attach means no capture, so there is no buffer of ours to grow and
+    // no reason to touch the device's logging config.
+    const { call, calls } = build([`${PKG}/.MainActivity\n`, 'Starting: Intent { }\n'])
+    await call('launch', { projectRoot: '/p', attach: false })
+    expect(calls.some((a) => a[0] === 'logcat' && a[1] === '-G')).toBe(false)
+  })
+
+  it('does not resize for an already-attached device', async () => {
+    // That capture's buffer was grown when it was attached, and its recorded
+    // outcome must not be overwritten by a second attempt this launch did not
+    // make on its behalf.
+    const { call, calls, captures } = build([`${PKG}/.MainActivity\n`, 'Starting: Intent { }\n'])
+    captures.attach(SERIAL)
+    await call('launch', { projectRoot: '/p' })
+    expect(calls.some((a) => a[0] === 'logcat' && a[1] === '-G')).toBe(false)
+  })
+
+  it('still launches when the resize fails', async () => {
+    const { call } = build(
+      [`${PKG}/.MainActivity\n`, 'Starting: Intent { }\n'],
+      PKG,
+      'failed to set buffer size',
+    )
+    const result = (await call('launch', { projectRoot: '/p' })) as { ok: boolean }
+    expect(result.ok).toBe(true)
   })
 })
