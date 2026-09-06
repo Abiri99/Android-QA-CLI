@@ -8,6 +8,7 @@ import { parseTarget, resolveOne, centerOf } from '../ui/target.js'
 import type { Point, Target } from '../ui/target.js'
 import { parsePredicate, pollUntil } from '../ui/predicate.js'
 import { readLogs, readCrashes } from '../adb/logcat.js'
+import { growLogcatBuffer } from '../adb/logcat-buffer.js'
 import { KEY_CODES } from '../driver/types.js'
 import type { KeyName } from '../driver/types.js'
 import { AgentQaError } from '../core/errors.js'
@@ -429,8 +430,15 @@ export function registerCommands(
 
   registry.register('state-attach', async (args) => {
     const device = await selectDevice(adb, serialArg(args))
-    captures.attach(device.serial)
-    return { ok: true, serial: device.serial }
+    // Grown before the stream starts reading, so the first lines of a run are
+    // not the ones a small default buffer discards. Never throws: a device
+    // that refuses the resize still gets attached, and `state stats` reports
+    // that it refused so a lossy run can point at the buffer instead of the
+    // app (spec 5.2).
+    const buffer = await growLogcatBuffer(adb, device.serial)
+    const capture = captures.attach(device.serial)
+    capture.noteBufferResult(buffer)
+    return { ok: true, serial: device.serial, buffer }
   })
 
   registry.register('state-detach', async (args) => {

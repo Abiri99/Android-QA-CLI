@@ -147,3 +147,122 @@ describe('state CLI', () => {
     }
   })
 })
+
+describe('state stats: the logcat buffer', () => {
+  it('says so when the buffer was never grown', async () => {
+    // A run dropping more lines than expected should be able to point at the
+    // buffer rather than send someone hunting the app for a fault.
+    const { server } = await withDaemon({
+      'state-stats': () => ({
+        lines: 9,
+        records: 3,
+        pid: 100,
+        restarts: 0,
+        running: true,
+        hasGap: true,
+        lastExitCode: null,
+        bufferAccepted: false,
+        bufferRequested: null,
+        bufferReport: null,
+        bufferReason: 'Invalid argument',
+      }),
+    })
+    try {
+      const out = sink()
+      await main(['state', 'stats'], out.write)
+      expect(out.lines.join('\n')).toContain('buffer=NOT GROWN')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('says the request was accepted, without claiming the size', async () => {
+    const { server } = await withDaemon({
+      'state-stats': () => ({
+        lines: 9,
+        records: 3,
+        pid: 100,
+        restarts: 0,
+        running: true,
+        hasGap: false,
+        lastExitCode: null,
+        bufferAccepted: true,
+        bufferRequested: '16M',
+        bufferReport: 'main: ring buffer is 16 MiB',
+        bufferReason: null,
+      }),
+    })
+    try {
+      const out = sink()
+      await main(['state', 'stats'], out.write)
+      expect(out.lines.join('\n')).toContain('buffer=accepted')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('says nothing about the buffer when nothing tried', async () => {
+    // A daemon that predates this must not read as a 16M buffer.
+    const { server } = await withDaemon({
+      'state-stats': () => ({
+        lines: 9,
+        records: 3,
+        pid: 100,
+        restarts: 0,
+        running: true,
+        hasGap: false,
+        lastExitCode: null,
+        bufferAccepted: null,
+        bufferRequested: null,
+        bufferReport: null,
+        bufferReason: null,
+      }),
+    })
+    try {
+      const out = sink()
+      await main(['state', 'stats'], out.write)
+      expect(out.lines.join('\n')).not.toContain('buffer=')
+    } finally {
+      await server.close()
+    }
+  })
+})
+
+describe('state attach: a refused buffer resize', () => {
+  it('says so at the moment it happens, not only via state stats', async () => {
+    const { server } = await withDaemon({
+      'state-attach': () => ({
+        ok: true,
+        serial: 'emulator-5554',
+        buffer: { accepted: false, reason: 'Invalid argument' },
+      }),
+    })
+    try {
+      const out = sink()
+      await main(['state', 'attach'], out.write)
+      const text = out.lines.join('\n')
+      expect(text).toContain('attached')
+      expect(text).toContain('could not be grown')
+      expect(text).toContain('Invalid argument')
+    } finally {
+      await server.close()
+    }
+  })
+
+  it('stays a bare line when the resize was accepted', async () => {
+    const { server } = await withDaemon({
+      'state-attach': () => ({
+        ok: true,
+        serial: 'emulator-5554',
+        buffer: { accepted: true, requested: '16M' },
+      }),
+    })
+    try {
+      const out = sink()
+      await main(['state', 'attach'], out.write)
+      expect(out.lines.join('\n')).toBe('attached')
+    } finally {
+      await server.close()
+    }
+  })
+})

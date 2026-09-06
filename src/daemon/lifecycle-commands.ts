@@ -1,6 +1,8 @@
 import { selectDevice } from '../adb/devices.js'
 import type { AdbRunner } from '../adb/runner.js'
 import { clearAppData, forceStop, installApk, launchApp } from '../adb/lifecycle.js'
+import { growLogcatBuffer } from '../adb/logcat-buffer.js'
+import type { BufferResult } from '../adb/logcat-buffer.js'
 import { AgentQaError } from '../core/errors.js'
 import type { CaptureManager } from '../state/capture.js'
 import type { CommandRegistry } from './server.js'
@@ -128,12 +130,21 @@ export function registerLifecycleCommands(
     // with no indication why. Attaching costs one idle logcat process on an
     // uninstrumented app, which is a price worth paying by default.
     const attach = args.attach !== false
+    let buffer: BufferResult | undefined
     // `CaptureManager.attach` restarts the stream, which resets the
     // projection — so an already-attached device is left alone rather than
     // having state captured before the launch thrown away.
     const alreadyAttached = deps.captures.get(device.serial) !== undefined
     const attached = attach && !alreadyAttached
-    if (attached) deps.captures.attach(device.serial)
+    if (attached) {
+      // Same terms as `state attach`: grown before the stream reads, never
+      // fatal, and the outcome recorded so `state stats` can attribute a lossy
+      // run to a small buffer. Only when THIS launch attaches — an
+      // already-attached capture had its buffer grown when it was attached,
+      // and a second attempt would overwrite the result it recorded then.
+      buffer = await growLogcatBuffer(deps.adb, device.serial)
+      deps.captures.attach(device.serial).noteBufferResult(buffer)
+    }
 
     try {
       const result = await launchApp(deps.adb, device.serial, applicationId, activity)
@@ -147,6 +158,9 @@ export function registerLifecycleCommands(
         // versus finding a stream that some earlier command started.
         attached,
         alreadyAttached,
+        // Surfaced here as well as in `state stats`, so an agent scripting
+        // against `launch --json` can see the outcome without a second call.
+        ...(buffer === undefined ? {} : { buffer }),
       }
     } finally {
       deps.refs.invalidate(device.serial)

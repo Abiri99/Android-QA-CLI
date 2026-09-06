@@ -101,6 +101,10 @@ agentqa state get auth.authenticated
 agentqa state stats      # counters, for diagnosing a quiet or lossy stream
 ```
 
+Attaching also grows the device's logcat ring buffer to 16M (`adb logcat -G`). The default is small enough that a chatty device discards our lines under ordinary load, and every discarded line becomes a gap that marks earlier values stale — so a small buffer doesn't make the tool lie, it makes it answer `unknown` far more than it needs to.
+
+If the device refuses the resize, attaching still happens and says so, and `state stats` reports `buffer=NOT GROWN` — so a lossy run can be attributed to the buffer rather than to the app. When it succeeds, `state stats` says `buffer=accepted` rather than `buffer=16M`, deliberately: some devices cap the request to the kernel logger's maximum and exit successfully without saying so, so a successful call is not evidence of the size. `--json` carries the device's own `logcat -g` report verbatim, which is.
+
 **Staleness is the point.** logcat drops lines silently under load, and a monotonic sequence number is the only evidence it happened. When a gap is detected, every value written before it reads `stale: true` — because it may have been superseded by a line nobody saw. Serving a stale value as if it were current is the worst thing this tool could do, so it doesn't: `state get` reports staleness, and `wait-for state` returns `E_STATE_STALE` rather than `E_TIMEOUT` when a key holds the expected value but cannot be trusted.
 
 ## Setting up a project
@@ -277,6 +281,7 @@ The lifecycle commands were written without a device to try them on. Each one be
 | `cmd package resolve-activity -c android.intent.category.LAUNCHER --brief <pkg>` returns the launcher component | Run it; compare with what a home-screen tap opens |
 | `am start -W` failures print `Error:` at line start, or an exception | `agentqa launch --activity <pkg>/.SomeNonExportedActivity` |
 | `am force-stop` prints nothing when it works | `agentqa stop --package com.does.not.exist` should fail, not report success |
+| `logcat -G 16M` is accepted, and by how much it is capped — some builds cap the per-buffer size silently, and older platforms lack `-G` entirely | `agentqa state attach --json`, then read the `logcat -g` report it carries: that is the device's own number, not ours |
 
 The generated `AgentQa.kt` has never been compiled. Its content is pinned by tests and the wire lines it is designed to produce are asserted against the real reader, but nothing here proves it compiles against a real Android project, or that its chunking and sequence numbering behave under a real logcat. Chunking failures are silent, so a payload larger than ~3KB is the first thing worth checking on a device: emit one, then `agentqa state get <key>` and confirm the value came back whole. Two more limits worth knowing before you hit them on a device rather than here: the helper requires **Kotlin 1.5 or newer**, and chunking splits payload strings by UTF-16 char count, so it can land inside a surrogate pair — an emoji landing exactly on a chunk boundary comes back as U+FFFD instead of itself.
 

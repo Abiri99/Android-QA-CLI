@@ -346,8 +346,21 @@ export async function main(
     .option('--device <serial>', 'target device serial')
     .option('--json', 'emit machine-readable JSON')
     .action(async (opts: { device?: string; json?: boolean }) => {
-      const data = await client.request('state-attach', { serial: opts.device })
-      emit(data, () => 'attached', jsonMode(opts), out)
+      const data = (await client.request('state-attach', { serial: opts.device })) as {
+        buffer?: { accepted: boolean; reason?: string }
+      }
+      emit(
+        data,
+        () =>
+          // Said here rather than left to `state stats`: this is the moment
+          // someone would want to know, and a refused resize means a smaller
+          // buffer and more dropped lines for the whole run.
+          data.buffer?.accepted === false
+            ? `attached — but the logcat buffer could not be grown (${data.buffer.reason ?? 'no reason given'}), so expect more dropped lines`
+            : 'attached',
+        jsonMode(opts),
+        out,
+      )
     })
 
   state
@@ -419,6 +432,10 @@ export async function main(
         running: boolean
         hasGap: boolean
         lastExitCode: number | null
+        bufferAccepted: boolean | null
+        bufferRequested: string | null
+        bufferReport: string | null
+        bufferReason: string | null
       }
       emit(
         data,
@@ -427,7 +444,16 @@ export async function main(
           `pid=${data.pid ?? '-'} restarts=${data.restarts} gap=${data.hasGap}` +
           // Only when there is one to report: a dead stream is why the values
           // suddenly read stale, and this is the evidence for it.
-          (data.lastExitCode === null ? '' : ` lastExit=${data.lastExitCode}`),
+          (data.lastExitCode === null ? '' : ` lastExit=${data.lastExitCode}`) +
+          // Likewise: a buffer that was never grown is why a run drops more
+          // lines than expected, and without this the reader is left hunting
+          // the app for a fault that is not there.
+          // `accepted`, not the size: adb caps the request silently on some
+          // devices, so claiming 16M from a successful call would be exactly
+          // the confident wrong answer this field exists to avoid. The
+          // device's own report is in --json.
+          (data.bufferAccepted === true ? ' buffer=accepted' : '') +
+          (data.bufferAccepted === false ? ' buffer=NOT GROWN' : ''),
         jsonMode(opts),
         out,
       )

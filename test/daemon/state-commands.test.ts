@@ -10,19 +10,32 @@ import { FakeStreamer } from '../helpers/fake-stream.js'
 const adb: AdbRunner = {
   async text(args) {
     if (args[0] === 'devices') return 'List of devices attached\nemulator-5554  device\n'
+    if (args[0] === 'logcat' && (args[1] === '-G' || args[1] === '-g')) return ''
     throw new Error(`unexpected adb call: ${args.join(' ')}`)
   },
   async binary() { return Buffer.alloc(0) },
 }
 
-function build() {
+function build(opts: { logcatG?: string } = {}) {
+  const adbCalls: string[][] = []
+  const recordingAdb: AdbRunner = {
+    async text(args, o) {
+      adbCalls.push(args)
+      if (args[0] === 'logcat' && args[1] === '-G' && opts.logcatG !== undefined) {
+        return opts.logcatG
+      }
+      if (args[0] === 'logcat' && args[1] === '-g') return 'main: ring buffer is 16 MiB'
+      return adb.text(args, o)
+    },
+    async binary() { return Buffer.alloc(0) },
+  }
   const streamer = new FakeStreamer()
   const captures = new CaptureManager(streamer)
   const registry = new CommandRegistry()
   registerCommands(
     registry,
-    new DriverRegistry(adb, () => new FakeDriver({ elements: [] })),
-    adb,
+    new DriverRegistry(recordingAdb, () => new FakeDriver({ elements: [] })),
+    recordingAdb,
     new RefStore(),
     captures,
   )
@@ -34,7 +47,7 @@ function build() {
   const emitOn = (i: number, line: string) => streamer.streams[i]!.emit(line)
   const wire = (seq: number, kind: string, key: string, payload: string) =>
     `10-04 12:00:01.000  100  100 I AgentQA : AGENTQA|v1|${seq}|${kind}|${key}|1/1|${payload}`
-  return { call, emit, die, dieOn, emitOn, wire, streamer, captures }
+  return { call, emit, die, dieOn, emitOn, wire, streamer, captures, adbCalls }
 }
 
 describe('state-attach', () => {
@@ -455,5 +468,32 @@ describe('detaching while a wait is pending', () => {
     setTimeout(() => void call('state-detach'), 20)
     expect(await pending).toMatchObject({ ok: false, error: { error: 'E_NOT_ATTACHED' } })
     expect(Date.now() - started).toBeLessThan(1000)
+  })
+})
+
+describe('growing the logcat buffer on attach', () => {
+  it('resizes the ring buffer before the capture reads from it', async () => {
+    const { call, adbCalls } = build()
+    await call('state-attach', {})
+    expect(adbCalls.some((a) => a[0] === 'logcat' && a[1] === '-G')).toBe(true)
+  })
+
+  it('reports the outcome through state stats', async () => {
+    const { call } = build()
+    await call('state-attach', {})
+    const res = (await call('state-stats', {})) as { data: { bufferAccepted: boolean | null } }
+    expect(res.data.bufferAccepted).toBe(true)
+  })
+
+  it('still attaches when the resize fails', async () => {
+    // A device that caps the size, or an older platform without -G. Reading a
+    // default-sized buffer beats not reading one.
+    const { call } = build({ logcatG: 'failed to set buffer size: Invalid argument' })
+    expect((await call('state-attach', {})).ok).toBe(true)
+    const res = (await call('state-stats', {})) as {
+      data: { bufferAccepted: boolean | null; bufferReason: string | null }
+    }
+    expect(res.data.bufferAccepted).toBe(false)
+    expect(res.data.bufferReason).toContain('Invalid argument')
   })
 })
