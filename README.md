@@ -48,6 +48,22 @@ agentqa screenshot --out /tmp/shot.png
 
 `#1` is a **ref**: it names an element in the snapshot you just read. Refs are invalidated by anything that could change the screen, so a stale one fails with `E_STALE_REF` rather than tapping whatever has since moved into that position.
 
+## App lifecycle
+
+```bash
+agentqa install app-debug.apk
+agentqa launch                  # attaches state capture first
+agentqa stop
+agentqa clear                   # wipes app data — this logs the app out
+```
+
+The package comes from `--package`, or `app.application_id` in `agentqa.toml`.
+
+Two behaviours worth knowing:
+
+- **`launch` attaches state capture before starting the app**, because state emitted during startup is gone by the time a later attach begins reading. Pass `--no-attach` to skip it. An already-attached device is left alone rather than restarted, so state captured before the launch survives.
+- **`install` and `clear` end the device's auth session** — the app's data is gone, so the login is gone with it. The checkpoint, the remembered deep link, and the "already notified about this gate" record are all dropped. `stop` does not: force-stopping leaves the data alone.
+
 ## Acting
 
 ```bash
@@ -218,7 +234,6 @@ Documented so you don't plan around something that isn't there:
 - **`agentqa init` and `AgentQa.kt`.** No generated instrumentation helper, no Gradle variant mapping, no `applicationId` resolution via aapt2, no `probe add|list|strip`. Instrument by hand using [the wire format](#the-wire-format).
 - **`auth snapshot|restore`.** `auth.strategy = "snapshot"` parses but does nothing; every run pauses. The design gates this behind validating, against one real app, that a `run-as` data-dir snapshot survives restore with auth intact.
 - **Run traces.** No `run start|end`, no `report`.
-- **Lifecycle commands.** No `install`, `launch`, `stop`, `clear`.
 
 ### Known limits of the adb driver
 

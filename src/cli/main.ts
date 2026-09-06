@@ -143,6 +143,92 @@ export async function main(
       }
     })
 
+  const lifecycleOpts = <T extends { project?: string; device?: string }>(opts: T) => ({
+    serial: opts.device,
+    projectRoot: optionalProjectRoot(opts.project),
+  })
+
+  program
+    .command('install')
+    .description('install an apk, replacing any existing copy')
+    .argument('<apk>', 'path to the .apk file')
+    .option('--device <serial>', 'target device serial')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (apkPath: string, opts: { device?: string; json?: boolean }) => {
+      const data = (await client.request('install', {
+        serial: opts.device,
+        apk: apkPath,
+      })) as { apk: string }
+      emit(data, () => `installed ${data.apk}`, jsonMode(opts), out)
+    })
+
+  program
+    .command('launch')
+    .description('start the app, attaching state capture first so startup state is not missed')
+    .option('--device <serial>', 'target device serial')
+    .option('--package <id>', 'application id, if not set in agentqa.toml')
+    .option('--activity <component>', 'launch this component instead of the resolved launcher')
+    .option('--no-attach', 'do not attach state capture before starting')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
+    .option('--json', 'emit machine-readable JSON')
+    .action(
+      async (opts: {
+        device?: string
+        package?: string
+        activity?: string
+        attach?: boolean
+        project?: string
+        json?: boolean
+      }) => {
+        const data = (await client.request('launch', {
+          ...lifecycleOpts(opts),
+          package: opts.package,
+          activity: opts.activity,
+          attach: opts.attach,
+        })) as { activity: string; attached: boolean }
+        emit(
+          data,
+          () => `launched ${data.activity}` + (data.attached ? ' (state capture attached)' : ''),
+          jsonMode(opts),
+          out,
+        )
+      },
+    )
+
+  program
+    .command('stop')
+    .description('force-stop the app, leaving its data alone')
+    .option('--device <serial>', 'target device serial')
+    .option('--package <id>', 'application id, if not set in agentqa.toml')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
+    .option('--json', 'emit machine-readable JSON')
+    .action(
+      async (opts: { device?: string; package?: string; project?: string; json?: boolean }) => {
+        const data = (await client.request('stop', {
+          ...lifecycleOpts(opts),
+          package: opts.package,
+        })) as { applicationId: string }
+        emit(data, () => `stopped ${data.applicationId}`, jsonMode(opts), out)
+      },
+    )
+
+  program
+    .command('clear')
+    .description('wipe the app\'s data — this logs it out')
+    .option('--device <serial>', 'target device serial')
+    .option('--package <id>', 'application id, if not set in agentqa.toml')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
+    .option('--json', 'emit machine-readable JSON')
+    .action(
+      async (opts: { device?: string; package?: string; project?: string; json?: boolean }) => {
+        const data = (await client.request('clear', {
+          ...lifecycleOpts(opts),
+          package: opts.package,
+        })) as { applicationId: string }
+        emit(data, () => `cleared ${data.applicationId}`, jsonMode(opts), out)
+      },
+    )
+
   program
     .command('tap')
     .description('tap an element or coordinate')
