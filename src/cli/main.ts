@@ -15,7 +15,7 @@ import type { LogLine } from '../adb/logcat.js'
 import { ExecAdbRunner, resolveAdbPath } from '../adb/runner.js'
 import { listDevices } from '../adb/devices.js'
 import { runChecks, renderChecks } from './doctor.js'
-import { instrumentationChecks } from './instrumentation-doctor.js'
+import { instrumentationChecks, toCounters } from './instrumentation-doctor.js'
 import { SKILL_DIR } from '../init/skill.js'
 import { findConfig } from '../config/load.js'
 import { runInit } from '../init/run.js'
@@ -734,7 +734,10 @@ export async function main(
           ...(await instrumentationChecks({
             stats: async () => {
               try {
-                return (await client.request('state-stats', {})) as { records: number }
+                // No autostart: spec 6 requires a doctor that works when the
+                // daemon does not, and spawning one is a heavier side effect
+                // than reporting `cannot assess`.
+                return toCounters(await client.request('state-stats', {}, { autostart: false }))
               } catch (e) {
                 // `E_NOT_ATTACHED` is the "nothing to look at" case the deps
                 // contract expresses as null. Anything else — a dead daemon, a
@@ -746,7 +749,7 @@ export async function main(
               }
             },
             keys: async () => {
-              const data = (await client.request('state-list', {})) as {
+              const data = (await client.request('state-list', {}, { autostart: false })) as {
                 entries: { key: string }[]
               }
               return data.entries.map((e) => e.key)
