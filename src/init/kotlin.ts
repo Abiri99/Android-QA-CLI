@@ -27,17 +27,31 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * Never emit credentials, tokens, or personal data: everything passed here
  * lands in the device log.
+ *
+ * Requires Kotlin 1.5 or newer (uses \`Char.code\`).
+ *
+ * Chunking splits payload strings by UTF-16 char count and can land exactly
+ * inside a surrogate pair; when it does, the astral character (many emoji) on
+ * that boundary is replaced by U+FFFD in the reassembled JSON string. This is
+ * a known, accepted limit rather than a bug to chase.
  */
 object AgentQa {
     private const val TAG = "AgentQA"
     private const val MARKER = "AGENTQA|${WIRE_VERSION}|"
 
     /**
-     * logcat truncates a line at roughly 4KB, including the header the system
-     * prepends. Splitting well below that leaves room for the header, the
-     * marker, and the key.
+     * logcat truncates a line at roughly 4068 BYTES, including the header the
+     * system prepends. \`String.chunked\` below counts UTF-16 CHARACTERS, not
+     * bytes, and a UTF-8-encoded character can take up to 4 bytes. So this
+     * constant is sized for the worst case: 900 chars * 4 bytes/char = 3600
+     * bytes, leaving roughly 468 bytes of headroom for the logcat header plus
+     * this line's own prefix (marker, sequence, kind, key, chunk notation).
+     * Do not "optimise" this back up toward 3000 — that number only works for
+     * ASCII payloads and silently truncates mid-chunk for CJK text, accented
+     * names, or emoji, producing a chunk that looks complete but decodes to
+     * broken JSON.
      */
-    private const val MAX_CHUNK = 3000
+    private const val MAX_CHUNK = 900
 
     @Volatile
     private var enabled = false

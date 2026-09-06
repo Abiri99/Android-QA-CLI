@@ -40,6 +40,27 @@ describe('agentQaKotlin', () => {
   it('swallows its own failures, because instrumentation must not crash the app', () => {
     expect(src).toContain('catch (t: Throwable)')
   })
+
+  it('sizes MAX_CHUNK so its worst-case UTF-8 byte length fits under logcat\'s line limit', () => {
+    // MAX_CHUNK feeds Kotlin's `String.chunked`, which counts UTF-16
+    // characters, not bytes. A single character can take up to 4 bytes once
+    // encoded as UTF-8 (logcat's truncation is byte-based), so the worst case
+    // for a chunk of MAX_CHUNK characters is MAX_CHUNK * 4 bytes. That must
+    // leave room for the logcat header plus this line's own prefix (marker,
+    // sequence, kind, key, chunk notation) under the ~4068-byte message limit.
+    // This does not assert a specific number: it pins the reasoning, so
+    // "optimising" the constant back up toward the character count would fail
+    // here even if nobody remembers why the number is small.
+    const match = src.match(/MAX_CHUNK\s*=\s*(\d+)/)
+    expect(match).not.toBeNull()
+    const maxChunk = Number(match![1])
+
+    const LOGCAT_LINE_LIMIT_BYTES = 4068
+    const PREFIX_ALLOWANCE_BYTES = 400 // marker + seq + kind + key + chunk notation + header
+
+    const worstCaseBytes = maxChunk * 4
+    expect(worstCaseBytes + PREFIX_ALLOWANCE_BYTES).toBeLessThan(LOGCAT_LINE_LIMIT_BYTES)
+  })
 })
 
 describe('agentQaComposeKotlin', () => {
