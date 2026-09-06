@@ -2,13 +2,14 @@ import { describe, it, expect } from 'vitest'
 import { CommandRegistry } from '../../src/daemon/server.js'
 import { registerCommands, DriverRegistry } from '../../src/daemon/commands.js'
 import { registerAuthCommands } from '../../src/daemon/auth-commands.js'
+import { registerLifecycleCommands } from '../../src/daemon/lifecycle-commands.js'
 import { createGateGuard } from '../../src/daemon/guard.js'
 import { RefStore } from '../../src/daemon/refs.js'
 import { CaptureManager } from '../../src/state/capture.js'
 import { ConfigRegistry } from '../../src/config/registry.js'
 import { GateTracker } from '../../src/auth/tracker.js'
 import { CheckpointStore } from '../../src/auth/checkpoint.js'
-import { clearAuthStateOnCaptureEnd } from '../../src/auth/lifecycle.js'
+import { clearAuthStateOnCaptureEnd, clearDeviceAuthState } from '../../src/auth/lifecycle.js'
 import { FakeDriver } from '../../src/driver/fake-driver.js'
 import { FakeStreamer } from '../helpers/fake-stream.js'
 import { callFor } from '../helpers/call.js'
@@ -37,6 +38,9 @@ function fakeAdb(): AdbRunner {
   return {
     async text(args) {
       if (args[0] === 'devices') return `List of devices attached\n${SERIAL}\tdevice\n`
+      // `pm clear` reports on stdout and exits 0 either way, so the command
+      // layer reads the word rather than the status.
+      if (args.includes('clear')) return 'Success\n'
       return ''
     },
     async binary() {
@@ -51,6 +55,7 @@ const config: ProjectConfig = {
   module: 'app',
   variant: 'debug',
   activeBuildTypes: ['debug'],
+  applicationId: 'com.example.app',
   strategy: 'manual',
   notify: true,
   traceEnabled: false,
@@ -107,11 +112,19 @@ function build() {
     checkpoints,
     notifierFor: () => notifier,
   })
-  registerCommands(registry, drivers, adb, new RefStore(), captures, guard, checkpoints, (root) =>
-    configs.forRoot(root).applicationId,
-  )
+  const applicationIdFor = (root: string) => configs.forRoot(root).applicationId
+  // One RefStore across both registrations, as `startDaemon` builds it.
+  const refs = new RefStore()
+  registerCommands(registry, drivers, adb, refs, captures, guard, checkpoints, applicationIdFor)
   registerAuthCommands(registry, { drivers, adb, captures, configs, checkpoints })
-  return { call: callFor(registry), driver, streamer, captures, checkpoints, notifier }
+  registerLifecycleCommands(registry, {
+    adb,
+    captures,
+    refs,
+    applicationIdFor,
+    onAppDataReset: (serial) => clearDeviceAuthState(tracker, checkpoints, serial),
+  })
+  return { call: callFor(registry), driver, streamer, captures, checkpoints, notifier, tracker }
 }
 
 const HEADER = '10-04 12:00:01.000  4242  4242 I AgentQA : '
@@ -255,5 +268,72 @@ describe('daemon wiring: real commands over a real guard', () => {
     }
     expect(result.blocking).toBeNull()
     expect(result.unevaluable).toEqual(['login'])
+  })
+})
+
+describe('daemon wiring: lifecycle commands over the real auth stores', () => {
+  it('clearing app data forgets the checkpoint, because the login went with it', async () => {
+    const { call, checkpoints } = build()
+    checkpoints.record({
+      serial: SERIAL,
+      screen: 'CheckoutScreen',
+      deeplink: 'example://checkout',
+      gate: 'login',
+      at: Date.now(),
+    })
+    await call('clear', { projectRoot: '/p' })
+    // Left in place, `auth wait --resume-to checkpoint` would replay a deep
+    // link into an app that has never seen this user, and report `resumed`.
+    expect(checkpoints.get(SERIAL)).toBeUndefined()
+  })
+
+  it('clearing app data re-arms the notification, since the next login is a new pause', async () => {
+    const { call, tracker } = build()
+    expect(tracker.shouldNotify(SERIAL, 'login')).toBe(true)
+    expect(tracker.shouldNotify(SERIAL, 'login')).toBe(false)
+    await call('clear', { projectRoot: '/p' })
+    expect(tracker.shouldNotify(SERIAL, 'login')).toBe(true)
+  })
+
+  it('stopping the app leaves the checkpoint alone, because the data is still there', async () => {
+    const { call, checkpoints } = build()
+    checkpoints.record({
+      serial: SERIAL,
+      screen: 'CheckoutScreen',
+      deeplink: 'example://checkout',
+      gate: 'login',
+      at: Date.now(),
+    })
+    await call('stop', { projectRoot: '/p' })
+    expect(checkpoints.get(SERIAL)?.screen).toBe('CheckoutScreen')
+  })
+
+  it('launch attaches capture before starting, so startup state is captured', async () => {
+    const { call, captures, streamer } = build()
+    await call('launch', { projectRoot: '/p', activity: 'com.example.app/.Main' })
+    expect(captures.get(SERIAL)).toBeDefined()
+    // The stream exists and is live before anything the app emits arrives.
+    emitAuth(streamer, 1, true)
+    expect(captures.require(SERIAL).projection.get('auth')?.value).toEqual({ authenticated: true })
+  })
+})
+
+describe('daemon wiring: one RefStore across both registrations', () => {
+  it('a lifecycle command invalidates a ref the act commands handed out', async () => {
+    // `startDaemon` hoists a single RefStore and passes it to both
+    // registrations. Nothing depended on that: with two stores, `clear` would
+    // invalidate its own and leave the act layer still resolving #1 against a
+    // snapshot of a screen that has since been wiped. This is the assertion
+    // that fails if the hoist is undone.
+    const { call } = build()
+    await call('screen', {})
+    await call('clear', { projectRoot: '/p' })
+    try {
+      await call('tap', { target: '#1' })
+      throw new Error('expected tap to throw')
+    } catch (e) {
+      if (!isAgentQaError(e)) throw e
+      expect(e.code).toBe('E_STALE_REF')
+    }
   })
 })

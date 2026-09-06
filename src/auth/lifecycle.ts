@@ -21,13 +21,27 @@ import type { CheckpointStore } from './checkpoint.js'
  * ignore `unknown`; nothing was telling it a session had ended. Returns an
  * unsubscribe function.
  */
+/**
+ * Forgets everything the daemon holds about one device's authentication.
+ *
+ * The primitive behind both triggers: a capture session ending, and the app's
+ * data being wiped by an install or a `clear`. Wiping data wipes the login, so
+ * a checkpoint into that session — and the record that the human was already
+ * told about a gate — describe something that no longer exists.
+ */
+export function clearDeviceAuthState(
+  tracker: GateTracker,
+  checkpoints: CheckpointStore,
+  serial: string,
+): void {
+  tracker.clearDevice(serial)
+  checkpoints.clear(serial)
+}
+
 export function clearAuthStateOnCaptureEnd(
   captures: CaptureManager,
   tracker: GateTracker,
   checkpoints: CheckpointStore,
 ): () => void {
-  return captures.onSessionEnd((serial) => {
-    tracker.clearDevice(serial)
-    checkpoints.clear(serial)
-  })
+  return captures.onSessionEnd((serial) => clearDeviceAuthState(tracker, checkpoints, serial))
 }

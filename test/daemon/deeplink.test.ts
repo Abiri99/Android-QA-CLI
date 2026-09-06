@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { CommandRegistry } from '../../src/daemon/server.js'
-import { registerCommands, DriverRegistry, intentResolutionFailed } from '../../src/daemon/commands.js'
+import { registerCommands, DriverRegistry } from '../../src/daemon/commands.js'
+import { intentResolutionFailed } from '../../src/adb/intents.js'
 import { RefStore } from '../../src/daemon/refs.js'
 import { CaptureManager } from '../../src/state/capture.js'
 import { FakeDriver } from '../../src/driver/fake-driver.js'
