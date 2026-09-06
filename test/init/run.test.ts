@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runInit } from '../../src/init/run.js'
 import { SKILL_DIR } from '../../src/init/skill.js'
+import { isAgentQaError } from '../../src/core/errors.js'
 
 const TOML = `[project]
 module = "app"
@@ -163,19 +164,37 @@ module = "app"
 variant = "debug"
 `,
     })
+    // Snapshot temp directory entries before calling runInit, to verify no
+    // temp files are created in this case.
+    const beforeEntries = new Set(
+      readdirSync(tmpdir()).filter((name) => name.startsWith('agentqa-init-')),
+    )
     const result = run(noPackage)
+    const afterEntries = new Set(
+      readdirSync(tmpdir()).filter((name) => name.startsWith('agentqa-init-')),
+    )
+
     expect(result.unplaceable).not.toBeNull()
     // A null path is the contract: no temp file was written for a package
     // value the tool never had, rather than a guessed one dressed up as
     // output.
     expect(result.unplaceable!.path).toBeNull()
     expect(result.unplaceable!.reason).toContain('package')
+    // Verify that no new temp directories were created.
+    expect(afterEntries).toEqual(beforeEntries)
     // The rest of init is still useful without it.
     expect(existsSync(join(noPackage, SKILL_DIR, 'SKILL.md'))).toBe(true)
   })
 
   it('throws E_NO_CONFIG when there is no agentqa.toml', () => {
     const bare = mkdtempSync(join(tmpdir(), 'agentqa-bare-'))
-    expect(() => run(bare)).toThrow()
+    try {
+      run(bare)
+      throw new Error('expected runInit to throw E_NO_CONFIG')
+    } catch (e) {
+      if (!isAgentQaError(e)) throw e
+      expect(e.code).toBe('E_NO_CONFIG')
+      expect(e.message).toContain(bare)
+    }
   })
 })
