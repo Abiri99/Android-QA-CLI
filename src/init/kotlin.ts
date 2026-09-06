@@ -60,8 +60,13 @@ object AgentQa {
      * One number per LINE on the wire, not per record: a chunked payload
      * consumes one for each chunk. The reader treats any break in the run as a
      * dropped line and marks earlier values stale, so this must never skip or
-     * repeat. Atomic because state() is called from whatever thread a
-     * ViewModel emits on.
+     * repeat.
+     *
+     * Atomic only buys UNIQUENESS of each number. It does NOT make a record's
+     * lines contiguous, and it does NOT make log order match allocation order
+     * — two threads can allocate 1 and 2 and then log 2 before 1, which the
+     * reader sees as a gap. The \`synchronized\` block in [emit] is what buys
+     * both of those; see the comment there.
      */
     private val seq = AtomicLong(0)
 
@@ -89,9 +94,23 @@ object AgentQa {
             val payload = toJson(value)
             val chunks = if (payload.isEmpty()) listOf("") else payload.chunked(MAX_CHUNK)
             val total = chunks.size
-            for (i in chunks.indices) {
-                val n = seq.incrementAndGet()
-                Log.i(TAG, MARKER + n + "|" + kind + "|" + key + "|" + (i + 1) + "/" + total + "|" + chunks[i])
+            // The lock spans allocation AND logging, for every chunk of this
+            // record. Without it two threads emitting the SAME key with
+            // chunked payloads interleave on the wire (A1/2, B1/2, A2/2), and
+            // the reader — which buffers one partial per key — overwrites A's
+            // first half with B's, then splices B's first half onto A's second
+            // and serves the result as a complete, fresh record. Sequence
+            // numbers stay contiguous, so nothing downstream flags it. The
+            // milder version of the same race is two single-chunk emissions
+            // logging out of allocation order, which reads as a dropped line
+            // and marks everything stale. Contention is irrelevant at the
+            // frequencies this is meant for, and emission is off entirely in
+            // release.
+            synchronized(this) {
+                for (i in chunks.indices) {
+                    val n = seq.incrementAndGet()
+                    Log.i(TAG, MARKER + n + "|" + kind + "|" + key + "|" + (i + 1) + "/" + total + "|" + chunks[i])
+                }
             }
         } catch (t: Throwable) {
             // Instrumentation must never crash the app it observes. A value we
@@ -161,8 +180,15 @@ import androidx.compose.ui.semantics.testTagsAsResourceId
  *
  * Returns a bare Modifier when AgentQa is disabled, so a release build carries
  * no extra semantics.
+ *
+ * The \`@OptIn\` is required: \`testTagsAsResourceId\` is marked
+ * \`@ExperimentalComposeUiApi\`, which is \`@RequiresOptIn\` at ERROR level in
+ * every widely-deployed Compose UI release, so omitting it is a compile error
+ * rather than a warning. On a newer Compose where the API has stabilised the
+ * opt-in is merely unnecessary, which is a warning — safe in both directions.
  */
 @Suppress("UnusedReceiverParameter")
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 fun AgentQa.semanticsModifier(): Modifier =
     if (AgentQa.isEnabled) Modifier.semantics { testTagsAsResourceId = true } else Modifier
 `

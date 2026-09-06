@@ -24,8 +24,32 @@ describe('agentQaKotlin', () => {
 
   it('uses an atomic counter, since state() is called from any thread', () => {
     // A torn counter is indistinguishable from a dropped line to the reader:
-    // it would manufacture exactly the staleness it exists to detect.
+    // it would manufacture exactly the staleness it exists to detect. Atomic
+    // buys uniqueness only; the lock asserted below is what buys wire order.
     expect(src).toContain('AtomicLong')
+  })
+
+  it('holds a lock across sequence allocation AND logging, for every chunk', () => {
+    // AtomicLong alone makes each number unique, not each record contiguous.
+    // Without a lock spanning the whole loop, two threads emitting the SAME
+    // key with chunked payloads interleave as A1/2, B1/2, A2/2 — and
+    // Reassembler, which buffers one partial per key, overwrites A's first
+    // half with B's and then returns B's first half spliced onto A's second
+    // as a complete record. The sequence numbers stay contiguous, so
+    // Projection flags no gap: the agent is handed a fabricated value with no
+    // staleness marker. This assertion is why the lock cannot be deleted.
+    const emit = src.slice(src.indexOf('private fun emit'), src.indexOf('private fun toJson'))
+    expect(emit).toContain('synchronized(this)')
+    const lockAt = emit.indexOf('synchronized(this)')
+    const loopAt = emit.indexOf('for (')
+    const incrementAt = emit.indexOf('incrementAndGet')
+    const logAt = emit.indexOf('Log.i(')
+    // The lock opens before the loop, so it spans every chunk of the record,
+    // and covers both the allocation and the write.
+    expect(lockAt).toBeGreaterThan(-1)
+    expect(loopAt).toBeGreaterThan(lockAt)
+    expect(incrementAt).toBeGreaterThan(lockAt)
+    expect(logAt).toBeGreaterThan(incrementAt)
   })
 
   it('increments the sequence once per chunk, not once per record', () => {
@@ -71,6 +95,17 @@ describe('agentQaComposeKotlin', () => {
 
   it('is the only file that mentions Compose', () => {
     expect(agentQaComposeKotlin('com.example.app')).toContain('androidx.compose')
+  })
+
+  it('opts in to the experimental API it uses, or the file does not compile', () => {
+    // `testTagsAsResourceId` is marked `@ExperimentalComposeUiApi`, which is
+    // `@RequiresOptIn` at the default ERROR level in every widely-deployed
+    // Compose UI release. Without an opt-in this file is a compile error in
+    // the user's own repo, on the normal `agentqa init` path. An unnecessary
+    // opt-in on a newer Compose is only a warning, so this is safe both ways.
+    const src = agentQaComposeKotlin('com.example.app')
+    expect(src).toContain('@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)')
+    expect(src.indexOf('@OptIn')).toBeLessThan(src.indexOf('fun AgentQa.semanticsModifier()'))
   })
 })
 
