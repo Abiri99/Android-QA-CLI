@@ -92,6 +92,7 @@ object AgentQa {
         if (!enabled) return
         try {
             val payload = toJson(value)
+            val safeKey = sanitizeKey(key)
             val chunks = if (payload.isEmpty()) listOf("") else payload.chunked(MAX_CHUNK)
             val total = chunks.size
             // The lock spans allocation AND logging, for every chunk of this
@@ -109,7 +110,7 @@ object AgentQa {
             synchronized(this) {
                 for (i in chunks.indices) {
                     val n = seq.incrementAndGet()
-                    Log.i(TAG, MARKER + n + "|" + kind + "|" + key + "|" + (i + 1) + "/" + total + "|" + chunks[i])
+                    Log.i(TAG, MARKER + n + "|" + kind + "|" + safeKey + "|" + (i + 1) + "/" + total + "|" + chunks[i])
                 }
             }
         } catch (t: Throwable) {
@@ -117,6 +118,23 @@ object AgentQa {
             // cannot encode is worth losing; the app is not.
         }
     }
+
+    /** A key character that cannot break the one-line, \`|\`-delimited wire format. */
+    private fun isKeySafe(c: Char): Boolean = c != '|' && c >= ' ' && c.code != 127
+
+    /**
+     * Replaces \`|\`, newlines and other control characters in a key.
+     *
+     * The wire format is one line with \`|\` delimiters, so a key containing
+     * one produces a line the reader rejects outright: the record vanishes
+     * with no trace on either side. Mangling the key keeps the record, so it
+     * shows up in \`agentqa state list\` looking wrong — which is
+     * discoverable — instead of the value simply never appearing. The skill
+     * asks for dotted lowercase keys, which never hit this.
+     */
+    private fun sanitizeKey(key: String): String =
+        if (key.all { isKeySafe(it) }) key
+        else key.map { if (isKeySafe(it)) it else '_' }.joinToString("")
 
     private fun toJson(value: Any?): String = when (value) {
         null -> "null"

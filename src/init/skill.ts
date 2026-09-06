@@ -63,6 +63,28 @@ if (BuildConfig.DEBUG) AgentQa.enable()
 
 Nothing is emitted until it is, which is what keeps this out of release builds.
 
+### If this screen is Compose
+
+Apply \`AgentQa.semanticsModifier()\` once at the Compose root:
+
+\`\`\`kotlin
+Box(modifier = AgentQa.semanticsModifier()) { AppNavHost() }
+\`\`\`
+
+Compose \`testTag\`s are invisible to \`uiautomator\` without it. Without that one
+modifier, QA cannot select an element by its tag at all and falls back to
+matching visible text — which breaks on the next copy change and does not
+survive translation. The modifier lives in \`AgentQaCompose.kt\`, which
+\`agentqa init\` writes next to \`AgentQa.kt\` in a Compose project, and it
+returns a bare \`Modifier\` when AgentQa is disabled, so release builds carry
+no extra semantics.
+
+Then tag the elements a flow has to touch, and keep the tags stable:
+
+\`\`\`kotlin
+Button(modifier = Modifier.testTag("checkout.submit"), onClick = ::submit) { ... }
+\`\`\`
+
 ## 2. The reserved keys are a contract
 
 - \`auth\` **must** carry \`{ "authenticated": <boolean> }\`.
@@ -70,6 +92,12 @@ Nothing is emitted until it is, which is what keeps this out of release builds.
 
 Everything else is opaque JSON that the tool stores and compares but does not
 interpret.
+
+A key may not contain \`|\` or a newline: the wire format is one line with
+\`|\` delimiters. The helper replaces those characters with \`_\` rather than
+dropping the record, so a key like \`a|b\` arrives as \`a_b\` and nothing you
+wait for will match it. Use dotted lowercase names — \`cart.itemCount\`,
+\`checkout.step\`.
 
 ## 3. Renaming a key is a breaking change
 

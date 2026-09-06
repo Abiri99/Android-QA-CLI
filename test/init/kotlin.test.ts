@@ -61,6 +61,19 @@ describe('agentQaKotlin', () => {
     expect(incrementAt).toBeGreaterThan(loopAt)
   })
 
+  it('sanitises the key, since a `|` in one would drop the record silently', () => {
+    // `key` is interpolated straight into a `|`-delimited line, so
+    // `AgentQa.state("a|b", ...)` used to produce a line parseWireLine returns
+    // null for — the record vanished with no trace on either side. Mangling
+    // the key at least keeps the record visible in `agentqa state list`.
+    const emit = src.slice(src.indexOf('private fun emit'), src.indexOf('private fun toJson'))
+    expect(emit).toContain('sanitizeKey(key)')
+    expect(emit).toContain('safeKey')
+    // The raw key must not reach the wire line.
+    expect(emit).not.toContain('"|" + key + "|"')
+    expect(src).toContain("c != '|'")
+  })
+
   it('swallows its own failures, because instrumentation must not crash the app', () => {
     expect(src).toContain('catch (t: Throwable)')
   })

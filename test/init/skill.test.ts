@@ -45,6 +45,24 @@ describe('skillMarkdown', () => {
     expect(md).toContain('agentqa doctor')
   })
 
+  it('tells a Compose author about the one Compose-specific thing init provides', () => {
+    // `init` writes AgentQaCompose.kt, and building a Compose screen is the
+    // skill's exact trigger. Without this, an agent is never told that Compose
+    // testTags are invisible to uiautomator until the modifier is applied.
+    expect(md).toContain('AgentQa.semanticsModifier()')
+    expect(md).toContain('AgentQaCompose.kt')
+    expect(md).toContain('testTag')
+    expect(md.toLowerCase()).toContain('compose')
+  })
+
+  it('states the character constraint on state keys', () => {
+    // A `|` in a key makes the emitted line unparseable. The helper mangles it
+    // rather than dropping the record, and the skill has to say so, since a
+    // mangled key silently matches nothing.
+    expect(md).toContain('may not contain')
+    expect(md).toContain('cart.itemCount')
+  })
+
   it('covers placing AgentQa.kt when init could not', () => {
     expect(md).toContain('package')
   })
