@@ -38,9 +38,13 @@ describe('agentQaKotlin', () => {
     // as a complete record. The sequence numbers stay contiguous, so
     // Projection flags no gap: the agent is handed a fabricated value with no
     // staleness marker. This assertion is why the lock cannot be deleted.
+    // Locks on a dedicated private object, not `synchronized(this)` — `this`
+    // is the public AgentQa singleton, which app code could hold or
+    // synchronize on for unrelated reasons and contend with instrumentation.
+    expect(src).toContain('private val lock = Any()')
     const emit = src.slice(src.indexOf('private fun emit'), src.indexOf('private fun toJson'))
-    expect(emit).toContain('synchronized(this)')
-    const lockAt = emit.indexOf('synchronized(this)')
+    expect(emit).toContain('synchronized(lock)')
+    const lockAt = emit.indexOf('synchronized(lock)')
     const loopAt = emit.indexOf('for (')
     const incrementAt = emit.indexOf('incrementAndGet')
     const logAt = emit.indexOf('Log.i(')

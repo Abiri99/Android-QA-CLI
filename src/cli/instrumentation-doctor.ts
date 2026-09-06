@@ -5,11 +5,14 @@ import type { CheckResult } from './doctor.js'
  * The two counters the capture keeps, each `null` when the daemon did not
  * report it as a number.
  *
- * `null` rather than a default, because the two fields disagree in a way that
- * matters: `lines` counts everything on the `AgentQA` tag, `records` counts
- * what `parseWireLine` accepted. `lines > 0 && records === 0` is a format
- * mismatch, not silence, and defaulting a missing field to 0 would let a
- * renamed field on the daemon side masquerade as a definitive diagnosis.
+ * `null` rather than a default, because defaulting a missing field to 0 would
+ * let a renamed field on the daemon side masquerade as a definitive diagnosis.
+ *
+ * Note what `lines` is NOT: it counts every line the stream delivered, before
+ * any parsing, including `adb`'s own separators — so `lines > 0 && records
+ * === 0` does not mean a format mismatch. It cannot tell that from an app
+ * that never emitted at all. Reading it as evidence either way was a real bug
+ * here; see the `records === 0` branch below.
  */
 export interface CaptureCounters {
   lines: number | null
@@ -123,10 +126,15 @@ export async function instrumentationChecks(deps: InstrumentationDeps): Promise<
     results.push({ name: 'instrumentation', status: 'unknown', detail })
     results.push({ name: 'reserved keys', status: 'unknown', detail })
   } else if (counters.records === 0) {
-    // `lines` is the disproving evidence one field away: it counts everything
-    // on the `AgentQA` tag, parsed or not. With lines and no records the app
-    // IS emitting and we cannot read it, which is the opposite diagnosis from
-    // "nothing is emitting" and has a different fix.
+    // `lines` counts every line the stream delivered on the `AgentQA` tag —
+    // parsed or not, including `adb`'s own `--------- beginning of main`
+    // separators — before any parsing happens. That means it cannot
+    // distinguish "nothing is emitting" from "something is emitting a format
+    // this CLI cannot parse": both leave `lines >= 0` and `records === 0`.
+    // Naming one cause over the other from `lines` alone was the bug this
+    // block exists to avoid — so the message below names both candidate
+    // causes and how to check each, rather than asserting either. It also
+    // never claims the app is running: nothing here checked that.
     if (counters.lines === null) {
       results.push({
         name: 'instrumentation',
@@ -134,18 +142,12 @@ export async function instrumentationChecks(deps: InstrumentationDeps): Promise<
         detail:
           'no records parsed, and the daemon did not report a line count — cannot tell silence from a format mismatch',
       })
-    } else if (counters.lines > 0) {
-      results.push({
-        name: 'instrumentation',
-        status: 'fail',
-        detail: `${counters.lines} line${counters.lines === 1 ? '' : 's'} on the AgentQA tag but none parsed as wire ${WIRE_VERSION} records — the emitter's format does not match this CLI. Re-run \`agentqa init\` to refresh AgentQa.kt, or check hand-written instrumentation against the wire format`,
-      })
     } else {
+      const n = counters.lines
       results.push({
         name: 'instrumentation',
         status: 'fail',
-        detail:
-          'no AgentQA lines seen on this capture — nothing is emitting on the `AgentQA` tag. Check that `AgentQa.enable()` is called at the entry point, and that the app was launched after `agentqa state attach`',
+        detail: `no wire records parsed from ${n} line${n === 1 ? '' : 's'} on this capture — either nothing is emitting (check \`AgentQa.enable()\` is called at the app's entry point) or the emitter's format does not match this CLI (check the skill version line below)`,
       })
     }
     results.push({ name: 'reserved keys', status: 'unknown', detail: 'nothing captured to check' })

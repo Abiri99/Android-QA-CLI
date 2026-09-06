@@ -70,6 +70,15 @@ object AgentQa {
      */
     private val seq = AtomicLong(0)
 
+    /**
+     * Dedicated lock object for [emit], rather than \`synchronized(this)\`.
+     * \`this\` is the public [AgentQa] singleton — app code holding it for any
+     * other reason (or synchronizing on it itself) would contend with, or
+     * deadlock against, this instrumentation. A private lock is reachable only
+     * from here.
+     */
+    private val lock = Any()
+
     @JvmStatic
     fun enable() {
         enabled = true
@@ -107,7 +116,7 @@ object AgentQa {
             // and marks everything stale. Contention is irrelevant at the
             // frequencies this is meant for, and emission is off entirely in
             // release.
-            synchronized(this) {
+            synchronized(lock) {
                 for (i in chunks.indices) {
                     val n = seq.incrementAndGet()
                     Log.i(TAG, MARKER + n + "|" + kind + "|" + safeKey + "|" + (i + 1) + "/" + total + "|" + chunks[i])

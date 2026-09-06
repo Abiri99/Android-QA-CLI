@@ -21,32 +21,36 @@ describe('instrumentation check', () => {
     expect(find(results, 'instrumentation').status).toBe('ok')
   })
 
-  it('fails loudly when the capture saw nothing at all', async () => {
+  it('fails loudly when the capture saw nothing at all, naming both possible causes', async () => {
+    // `lines` counts every line delivered on the tag before any parsing —
+    // including adb's own separators — so `lines: 0, records: 0` cannot rule
+    // out "the app is emitting something unparseable" any more than it can
+    // rule out "nothing is emitting". The detail must name both rather than
+    // pick one.
     const results = await instrumentationChecks(
       deps({ stats: async () => ({ lines: 0, records: 0 }) }),
     )
     const check = find(results, 'instrumentation')
     expect(check.status).toBe('fail')
-    expect(check.detail).toContain('no AgentQA lines')
+    expect(check.detail).toContain('AgentQa.enable()')
+    expect(check.detail).toContain('format does not match')
     // Nothing here checked whether the app is running, so it must not say so.
     expect(check.detail).not.toContain('the app is running')
   })
 
-  it('blames the wire format, not enable(), when lines arrived but none parsed', async () => {
-    // `lines` counts everything on the AgentQA tag; `records` counts what
-    // parseWireLine accepted. Lines with no records means the app IS emitting
-    // and we cannot read it — a version mismatch or hand-rolled
-    // instrumentation with a bad format. Telling that person to check
-    // `AgentQa.enable()` is the opposite diagnosis, with the disproving
-    // evidence one field away.
+  it('names both possible causes, not just the wire format, when lines arrived but none parsed', async () => {
+    // `lines` counts everything on the AgentQA tag, parsed or not — it cannot
+    // tell "nothing is emitting" apart from "something is emitting a format
+    // this CLI cannot parse". The old code blamed the wire format outright
+    // here; the fix must name both candidate causes and how to check each.
     const results = await instrumentationChecks(
       deps({ stats: async () => ({ lines: 40, records: 0 }) }),
     )
     const check = find(results, 'instrumentation')
     expect(check.status).toBe('fail')
-    expect(check.detail).toContain('40 lines')
-    expect(check.detail).toContain('none parsed')
-    expect(check.detail).not.toContain('AgentQa.enable()')
+    expect(check.detail).toContain('40 line')
+    expect(check.detail).toContain('AgentQa.enable()')
+    expect(check.detail).toContain('format does not match')
   })
 
   it('cannot assess when records are zero and the line count is missing', async () => {
