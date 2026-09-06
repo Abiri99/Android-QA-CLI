@@ -300,3 +300,36 @@ describe('launch grows the logcat buffer when it attaches', () => {
     expect(result.ok).toBe(true)
   })
 })
+
+describe('launch reports the buffer outcome in its own response', () => {
+  it('carries it, so an agent need not make a second state stats call', async () => {
+    const { call } = build([`${PKG}/.MainActivity\n`, 'Starting: Intent { }\n'])
+    const result = (await call('launch', { projectRoot: '/p' })) as {
+      buffer?: { accepted: boolean }
+    }
+    expect(result.buffer?.accepted).toBe(true)
+  })
+
+  it('carries the refusal too', async () => {
+    const { call } = build(
+      [`${PKG}/.MainActivity\n`, 'Starting: Intent { }\n'],
+      PKG,
+      'failed to set buffer size: Invalid argument',
+    )
+    const result = (await call('launch', { projectRoot: '/p' })) as {
+      buffer?: { accepted: boolean; reason?: string }
+    }
+    expect(result.buffer?.accepted).toBe(false)
+    expect(result.buffer?.reason).toContain('Invalid argument')
+  })
+
+  it('omits the field entirely when this launch did not attach', async () => {
+    // Not `buffer: undefined` — there was no resize to report on.
+    const { call } = build([`${PKG}/.MainActivity\n`, 'Starting: Intent { }\n'])
+    const result = (await call('launch', { projectRoot: '/p', attach: false })) as Record<
+      string,
+      unknown
+    >
+    expect('buffer' in result).toBe(false)
+  })
+})
