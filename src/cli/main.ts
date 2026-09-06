@@ -16,6 +16,7 @@ import { ExecAdbRunner, resolveAdbPath } from '../adb/runner.js'
 import { listDevices } from '../adb/devices.js'
 import { runChecks, renderChecks } from './doctor.js'
 import { findConfig } from '../config/load.js'
+import { runInit } from '../init/run.js'
 import type { GateReport } from '../daemon/auth-commands.js'
 
 const require = createRequire(import.meta.url)
@@ -661,6 +662,51 @@ export async function main(
         () =>
           `gate ${data.gate} cleared (${data.confirmed ? 'confirmed by app state' : 'inferred from the screen'})` +
           (data.resumed === undefined ? '' : `, resumed: ${data.resumed}`),
+        jsonMode(opts),
+        out,
+      )
+    })
+
+  program
+    .command('init')
+    .description(
+      'set up this project for agentqa: the runtime helper, the coding-agent skill, and the pointers that make an agent use it',
+    )
+    .option('--project <dir>', 'project directory containing agentqa.toml')
+    .option('--compose', 'write the Compose extension regardless of detection')
+    .option('--no-compose', 'skip the Compose extension regardless of detection')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { project?: string; compose?: boolean; json?: boolean }) => {
+      const data = runInit({
+        projectRoot: opts.project ?? process.cwd(),
+        cliVersion: version,
+        // `--compose` and `--no-compose` both write to the same `compose`
+        // property, and `opts.compose === true` alone cannot tell "the user
+        // said nothing" from a coerced default — so only forward a value
+        // when one of the flags was actually named, and let Compose
+        // detection run otherwise.
+        ...(argv.includes('--compose') || argv.includes('--no-compose')
+          ? { compose: opts.compose === true }
+          : {}),
+      })
+      emit(
+        data,
+        () => {
+          const lines = data.written.map((p) => `wrote    ${p}`)
+          for (const p of data.skipped) lines.push(`already  ${p}`)
+          if (data.unplaceable) {
+            lines.push('', `Could not place AgentQa.kt: ${data.unplaceable.reason}`)
+            if (data.unplaceable.path) {
+              lines.push(
+                `Wrote it to ${data.unplaceable.path}`,
+                'Put it where this project keeps its Kotlin sources and change ONLY the',
+                'package line — the rest is protocol-critical, and its chunking and',
+                'sequence numbering fail silently when altered.',
+              )
+            }
+          }
+          return lines.join('\n')
+        },
         jsonMode(opts),
         out,
       )
