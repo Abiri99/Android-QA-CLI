@@ -23,6 +23,9 @@ import { intentResolutionFailed } from './intents.js'
 /** stdout and stderr both, since which stream adb uses varies by version. */
 const READ_BOTH = { includeStderr: true } as const
 
+/** Pushing and installing a real debug apk routinely outlasts the 30s default. */
+const INSTALL_TIMEOUT_MS = 300_000
+
 function adbFailed(message: string, details: Record<string, unknown>): AgentQaError {
   return new AgentQaError('E_ADB_FAILED', message, details)
 }
@@ -37,9 +40,24 @@ export async function installApk(
   if (!existsSync(apkPath)) {
     throw new AgentQaError('E_BAD_ARGS', `no apk at ${apkPath}`, { apkPath })
   }
-  const output = await adb.text(['install', '-r', apkPath], { serial, ...READ_BOTH })
-  if (/^\s*(Failure|Error)\b/im.test(output)) {
-    throw adbFailed(`installing ${apkPath} failed: ${output.trim()}`, { apkPath, serial, output })
+  const output = await adb.text(['install', '-r', apkPath], {
+    serial,
+    ...READ_BOTH,
+    // The default 30s bound is below what a real debug apk takes to push and
+    // install, so leaving it would fail the normal path.
+    timeoutMs: INSTALL_TIMEOUT_MS,
+  })
+  // Requires the positive word, for the same reason `clearAppData` does. The
+  // modern failure line is `adb: failed to install app.apk: Failure [...]`,
+  // which does not start with `Failure` — a negative-word check misses it and
+  // reports a phantom install, and the caller then wipes the device's auth
+  // session for a side effect that never happened.
+  if (!/^\s*Success\b/im.test(output)) {
+    throw adbFailed(`installing ${apkPath} failed: ${output.trim() || '(no output)'}`, {
+      apkPath,
+      serial,
+      output,
+    })
   }
   return output.trim()
 }
@@ -60,7 +78,19 @@ export async function resolveLauncherActivity(
   applicationId: string,
 ): Promise<string> {
   const output = await adb.text(
-    ['shell', 'cmd', 'package', 'resolve-activity', '--brief', applicationId],
+    [
+      'shell',
+      'cmd',
+      'package',
+      'resolve-activity',
+      // Without a category this resolves an intent with no action, which can
+      // answer with a non-launcher activity of the same package — and the
+      // prefix check below would wave that through as correct.
+      '-c',
+      'android.intent.category.LAUNCHER',
+      '--brief',
+      applicationId,
+    ],
     { serial, ...READ_BOTH },
   )
   // `--brief` prints the component on its own line, but some devices emit a
@@ -103,10 +133,24 @@ export async function launchApp(
   activity?: string,
 ): Promise<LaunchResult> {
   const component = activity ?? (await resolveLauncherActivity(adb, serial, applicationId))
-  const output = await adb.text(['shell', 'am', 'start', '-n', component], {
-    serial,
-    ...READ_BOTH,
-  })
+  // `-W` makes am wait for the launch and report a parseable status rather than
+  // returning the moment the intent is dispatched.
+  //
+  // The action and category are added only when we resolved the launcher
+  // ourselves: `-n` alone delivers an intent with a null action, and an app
+  // that branches on `intent.action` in `onCreate` takes a path a real
+  // launcher tap never would. An explicitly named activity is deliberately not
+  // the launcher, so it gets neither.
+  const args =
+    activity === undefined
+      ? [
+          'shell', 'am', 'start', '-W',
+          '-a', 'android.intent.action.MAIN',
+          '-c', 'android.intent.category.LAUNCHER',
+          '-n', component,
+        ]
+      : ['shell', 'am', 'start', '-W', '-n', component]
+  const output = await adb.text(args, { serial, ...READ_BOTH })
   if (intentResolutionFailed(output)) {
     throw adbFailed(`launching ${component} started nothing: ${output.trim()}`, {
       applicationId,
@@ -118,12 +162,32 @@ export async function launchApp(
   return { activity: component, output: output.trim() }
 }
 
+const SHELL_ERROR = /^\s*(Error|Exception|Failure)\b|\bjava\.lang\.\w+Exception\b/im
+
+/**
+ * Force-stops the app.
+ *
+ * `am force-stop` prints nothing when it works, so silence is the success
+ * signal and there is no positive word to require. But it exits 0 whatever
+ * happens, so an error it printed has to be read — otherwise `stop --package
+ * com.typo` reports "stopped com.typo" for an app that was never there.
+ */
 export async function forceStop(
   adb: AdbRunner,
   serial: string,
   applicationId: string,
 ): Promise<void> {
-  await adb.text(['shell', 'am', 'force-stop', applicationId], { serial, ...READ_BOTH })
+  const output = await adb.text(['shell', 'am', 'force-stop', applicationId], {
+    serial,
+    ...READ_BOTH,
+  })
+  if (SHELL_ERROR.test(output)) {
+    throw adbFailed(`force-stopping ${applicationId} failed: ${output.trim()}`, {
+      applicationId,
+      serial,
+      output,
+    })
+  }
 }
 
 export async function clearAppData(

@@ -317,3 +317,23 @@ describe('daemon wiring: lifecycle commands over the real auth stores', () => {
     expect(captures.require(SERIAL).projection.get('auth')?.value).toEqual({ authenticated: true })
   })
 })
+
+describe('daemon wiring: one RefStore across both registrations', () => {
+  it('a lifecycle command invalidates a ref the act commands handed out', async () => {
+    // `startDaemon` hoists a single RefStore and passes it to both
+    // registrations. Nothing depended on that: with two stores, `clear` would
+    // invalidate its own and leave the act layer still resolving #1 against a
+    // snapshot of a screen that has since been wiped. This is the assertion
+    // that fails if the hoist is undone.
+    const { call } = build()
+    await call('screen', {})
+    await call('clear', { projectRoot: '/p' })
+    try {
+      await call('tap', { target: '#1' })
+      throw new Error('expected tap to throw')
+    } catch (e) {
+      if (!isAgentQaError(e)) throw e
+      expect(e.code).toBe('E_STALE_REF')
+    }
+  })
+})

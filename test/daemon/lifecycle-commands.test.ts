@@ -182,3 +182,74 @@ describe('stop', () => {
     expect(sessionResets).toEqual([])
   })
 })
+
+describe('the captured state must not outlive the app it describes', () => {
+  /**
+   * The hole this closes: `clearDeviceAuthState` forgets the checkpoint and the
+   * notification record, but the gate guard does not decide from either — it
+   * decides from `capture.projection`. Nothing was clearing that, and the
+   * projection only resets itself on a dead stream or a new pid, neither of
+   * which `pm clear` causes. So immediately after a wipe the projection still
+   * served `auth.authenticated: true` as FRESH, the guard found no open gate,
+   * and the next tap went into a logged-out app with no error and no pause.
+   */
+  const withAuth = (captures: CaptureManager) => {
+    const capture = captures.attach(SERIAL)
+    capture.projection.apply({ kind: 'state', key: 'auth', payload: '{"authenticated":true}', seq: 1 })
+    return capture
+  }
+
+  it('clear drops the projection, because the values describe data that is gone', async () => {
+    const { call, captures } = build(['Success\n'])
+    const capture = withAuth(captures)
+    expect(capture.projection.get('auth')).toBeDefined()
+    await call('clear', { projectRoot: '/p' })
+    expect(capture.projection.get('auth')).toBeUndefined()
+  })
+
+  it('install drops the projection, because the values came from the old build', async () => {
+    const { call, captures } = build(['Success\n'])
+    const capture = withAuth(captures)
+    await call('install', { apk: apk() })
+    expect(capture.projection.get('auth')).toBeUndefined()
+  })
+
+  it('a failed clear leaves the projection alone, since nothing was wiped', async () => {
+    const { call, captures } = build(['Failed\n'])
+    const capture = withAuth(captures)
+    await expect(call('clear', { projectRoot: '/p' })).rejects.toThrow()
+    expect(capture.projection.get('auth')?.value).toEqual({ authenticated: true })
+  })
+
+  it('stop marks the projection stale rather than dropping it', async () => {
+    // The data survives a force-stop, so the values may well be true again when
+    // the app restarts — but they describe a process that is now dead, so they
+    // are no longer evidence of anything.
+    const { call, captures } = build()
+    const capture = withAuth(captures)
+    await call('stop', { projectRoot: '/p' })
+    expect(capture.projection.get('auth')?.stale).toBe(true)
+  })
+
+  it('is harmless when no capture is attached', async () => {
+    const { call } = build(['Success\n'])
+    await expect(call('clear', { projectRoot: '/p' })).resolves.toBeTruthy()
+  })
+})
+
+describe('launch reports whether it actually attached', () => {
+  it('distinguishes attaching from finding one already running', async () => {
+    // `attached: true` for a device that was already attached tells an agent
+    // this launch secured the startup state, when in fact an earlier attach
+    // did — and if that earlier attach came after a previous launch, nobody
+    // secured it.
+    const { call, captures } = build([`${PKG}/.MainActivity\n`, 'Starting: Intent { }\n'])
+    captures.attach(SERIAL)
+    const result = (await call('launch', { projectRoot: '/p' })) as {
+      attached: boolean
+      alreadyAttached: boolean
+    }
+    expect(result.alreadyAttached).toBe(true)
+    expect(result.attached).toBe(false)
+  })
+})

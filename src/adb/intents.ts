@@ -26,9 +26,14 @@
  */
 const AM_FAILURE = /^\s*Error:/m
 const AM_UNRESOLVED = /unable to resolve Intent/i
+// `am start` against a non-exported activity — reachable through `launch
+// --activity` — reports a SecurityException rather than an `Error:` line, and
+// was otherwise a quiet false success on the one path that overrides
+// resolution.
+const AM_EXCEPTION = /^\s*(?:java\.lang\.)?\w*Exception\b/m
 
 export function intentResolutionFailed(output: string): boolean {
-  return AM_FAILURE.test(output) || AM_UNRESOLVED.test(output)
+  return AM_FAILURE.test(output) || AM_UNRESOLVED.test(output) || AM_EXCEPTION.test(output)
 }
 
 /**

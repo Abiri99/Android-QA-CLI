@@ -59,10 +59,11 @@ agentqa clear                   # wipes app data — this logs the app out
 
 The package comes from `--package`, or `app.application_id` in `agentqa.toml`.
 
-Two behaviours worth knowing:
+Three behaviours worth knowing:
 
 - **`launch` attaches state capture before starting the app**, because state emitted during startup is gone by the time a later attach begins reading. Pass `--no-attach` to skip it. An already-attached device is left alone rather than restarted, so state captured before the launch survives.
-- **`install` and `clear` end the device's auth session** — the app's data is gone, so the login is gone with it. The checkpoint, the remembered deep link, and the "already notified about this gate" record are all dropped. `stop` does not: force-stopping leaves the data alone.
+- **`clear` and `install` discard the captured state and the device's auth session.** For `clear` the reason is direct: the data is gone, so the login is gone, and so is any checkpoint into that session. For `install` it is deliberate caution rather than certainty — `install -r` reinstalls *preserving* data, so the login may well survive, but the code did not, and a checkpoint naming a screen in the previous build is not somewhere to navigate back to on faith.
+- **`stop` marks the captured state stale rather than dropping it.** The data survives a force-stop, so those values may be true again when the app restarts — but the process that wrote them is dead, so they have stopped being evidence.
 
 ## Acting
 
@@ -234,6 +235,18 @@ Documented so you don't plan around something that isn't there:
 - **`agentqa init` and `AgentQa.kt`.** No generated instrumentation helper, no Gradle variant mapping, no `applicationId` resolution via aapt2, no `probe add|list|strip`. Instrument by hand using [the wire format](#the-wire-format).
 - **`auth snapshot|restore`.** `auth.strategy = "snapshot"` parses but does nothing; every run pauses. The design gates this behind validating, against one real app, that a `run-as` data-dir snapshot survives restore with auth intact.
 - **Run traces.** No `run start|end`, no `report`.
+
+### Untested assumptions about adb
+
+The lifecycle commands were written without a device to try them on. Each one bets on how a real `adb` behaves, and every bet is written so a wrong one fails loudly — but these are the first things to check against a real device:
+
+| Assumption | Check |
+|---|---|
+| `pm clear` prints a line starting with `Success` | `adb shell pm clear <pkg>` — confirm the exact word on your API level |
+| `adb install` prints `Success`, and finishes within 5 minutes | Install your real debug apk and time it |
+| `cmd package resolve-activity -c android.intent.category.LAUNCHER --brief <pkg>` returns the launcher component | Run it; compare with what a home-screen tap opens |
+| `am start -W` failures print `Error:` at line start, or an exception | `agentqa launch --activity <pkg>/.SomeNonExportedActivity` |
+| `am force-stop` prints nothing when it works | `agentqa stop --package com.does.not.exist` should fail, not report success |
 
 ### Known limits of the adb driver
 
