@@ -222,6 +222,7 @@ export function loadConfig(
 
   const applicationId = str(app, 'application_id', 'app', configPath)
   const deeplinkScheme = str(app, 'deeplink_scheme', 'app', configPath)
+  const packageName = str(project, 'package', 'project', configPath)
 
   return {
     root: dirname(configPath),
@@ -231,6 +232,7 @@ export function loadConfig(
     activeBuildTypes: stringArray(project, 'active_build_types', 'project', configPath) ?? [variant],
     ...(applicationId === undefined ? {} : { applicationId }),
     ...(deeplinkScheme === undefined ? {} : { deeplinkScheme }),
+    ...(packageName === undefined ? {} : { packageName }),
     strategy: strategyRaw as AuthStrategy,
     notify: bool(auth, 'notify', 'auth', configPath) ?? true,
     gates,

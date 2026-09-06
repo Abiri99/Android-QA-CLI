@@ -1,6 +1,8 @@
+export type CheckStatus = 'ok' | 'fail' | 'unknown'
+
 export interface CheckResult {
   name: string
-  ok: boolean
+  status: CheckStatus
   detail: string
 }
 
@@ -25,17 +27,17 @@ export async function runChecks(deps: DoctorDeps): Promise<CheckResult[]> {
   const major = Number(/^v(\d+)/.exec(node)?.[1] ?? '0')
   results.push({
     name: 'node',
-    ok: major >= MIN_NODE_MAJOR,
+    status: major >= MIN_NODE_MAJOR ? 'ok' : 'fail',
     detail: major >= MIN_NODE_MAJOR ? node : `${node} (need v${MIN_NODE_MAJOR}+)`,
   })
 
   try {
     const version = (await deps.adbVersion()).split('\n')[0] ?? ''
-    results.push({ name: 'adb', ok: true, detail: `${version.trim()} at ${deps.adbPath()}` })
+    results.push({ name: 'adb', status: 'ok', detail: `${version.trim()} at ${deps.adbPath()}` })
   } catch (e) {
     results.push({
       name: 'adb',
-      ok: false,
+      status: 'fail',
       detail: `${e instanceof Error ? e.message : String(e)} (looked at ${deps.adbPath()})`,
     })
   }
@@ -44,17 +46,17 @@ export async function runChecks(deps: DoctorDeps): Promise<CheckResult[]> {
     const devices = await deps.devices()
     const ready = devices.filter((d) => d.state === 'device')
     if (ready.length > 0) {
-      results.push({ name: 'devices', ok: true, detail: ready.map((d) => d.serial).join(', ') })
+      results.push({ name: 'devices', status: 'ok', detail: ready.map((d) => d.serial).join(', ') })
     } else if (devices.length === 0) {
       results.push({
         name: 'devices',
-        ok: false,
+        status: 'fail',
         detail: 'no device attached — start an emulator or plug in a phone',
       })
     } else {
       results.push({
         name: 'devices',
-        ok: false,
+        status: 'fail',
         detail: devices
           .map((d) => `${d.serial} is ${d.state}`)
           .join('; ')
@@ -64,7 +66,7 @@ export async function runChecks(deps: DoctorDeps): Promise<CheckResult[]> {
   } catch (e) {
     results.push({
       name: 'devices',
-      ok: false,
+      status: 'fail',
       detail: e instanceof Error ? e.message : String(e),
     })
   }
@@ -72,9 +74,11 @@ export async function runChecks(deps: DoctorDeps): Promise<CheckResult[]> {
   return results
 }
 
+const MARK: Record<CheckStatus, string> = { ok: 'ok  ', fail: 'FAIL', unknown: '?   ' }
+
 export function renderChecks(results: CheckResult[]): string {
   const width = Math.max(...results.map((r) => r.name.length))
   return results
-    .map((r) => `${r.ok ? 'ok  ' : 'FAIL'}  ${r.name.padEnd(width)}  ${r.detail}`)
+    .map((r) => `${MARK[r.status]}  ${r.name.padEnd(width)}  ${r.detail}`)
     .join('\n')
 }

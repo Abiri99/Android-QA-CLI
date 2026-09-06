@@ -1,6 +1,6 @@
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { CommanderError } from 'commander'
 import { DaemonClient } from '../ipc/client.js'
 import { daemonSocketPath } from '../core/paths.js'
@@ -15,7 +15,10 @@ import type { LogLine } from '../adb/logcat.js'
 import { ExecAdbRunner, resolveAdbPath } from '../adb/runner.js'
 import { listDevices } from '../adb/devices.js'
 import { runChecks, renderChecks } from './doctor.js'
+import { instrumentationChecks, toCounters } from './instrumentation-doctor.js'
+import { SKILL_DIR } from '../init/skill.js'
 import { findConfig } from '../config/load.js'
+import { runInit } from '../init/run.js'
 import type { GateReport } from '../daemon/auth-commands.js'
 
 const require = createRequire(import.meta.url)
@@ -667,10 +670,56 @@ export async function main(
     })
 
   program
+    .command('init')
+    .description(
+      'set up this project for agentqa: the runtime helper, the coding-agent skill, and the pointers that make an agent use it',
+    )
+    .option('--project <dir>', 'project directory containing agentqa.toml')
+    .option('--compose', 'write the Compose extension regardless of detection')
+    .option('--no-compose', 'skip the Compose extension regardless of detection')
+    .option('--json', 'emit machine-readable JSON')
+    .action(async (opts: { project?: string; compose?: boolean; json?: boolean }) => {
+      const data = runInit({
+        projectRoot: opts.project ?? process.cwd(),
+        cliVersion: version,
+        // `--compose` and `--no-compose` both write to the same `compose`
+        // property, and `opts.compose === true` alone cannot tell "the user
+        // said nothing" from a coerced default — so only forward a value
+        // when one of the flags was actually named, and let Compose
+        // detection run otherwise.
+        ...(argv.includes('--compose') || argv.includes('--no-compose')
+          ? { compose: opts.compose === true }
+          : {}),
+      })
+      emit(
+        data,
+        () => {
+          const lines = data.written.map((p) => `wrote    ${p}`)
+          for (const p of data.skipped) lines.push(`already  ${p}`)
+          if (data.unplaceable) {
+            lines.push('', `Could not place AgentQa.kt: ${data.unplaceable.reason}`)
+            if (data.unplaceable.path) {
+              lines.push(
+                `Wrote it to ${data.unplaceable.path}`,
+                'Put it where this project keeps its Kotlin sources and change ONLY the',
+                'package line — the rest is protocol-critical, and its chunking and',
+                'sequence numbering fail silently when altered.',
+              )
+            }
+          }
+          return lines.join('\n')
+        },
+        jsonMode(opts),
+        out,
+      )
+    })
+
+  program
     .command('doctor')
     .description('check that the environment is ready')
+    .option('--project <dir>', 'project directory containing agentqa.toml')
     .option('--json', 'emit machine-readable JSON')
-    .action(async (opts: { json?: boolean }) => {
+    .action(async (opts: { project?: string; json?: boolean }) => {
       const adb = new ExecAdbRunner(resolveAdbPath())
       const results = await runChecks({
         adbPath: resolveAdbPath,
@@ -678,8 +727,52 @@ export async function main(
         devices: () => listDevices(adb),
         nodeVersion: () => process.version,
       })
+
+      const root = optionalProjectRoot(opts.project)
+      if (root) {
+        results.push(
+          ...(await instrumentationChecks({
+            stats: async () => {
+              try {
+                // No autostart: spec 6 requires a doctor that works when the
+                // daemon does not, and spawning one is a heavier side effect
+                // than reporting `cannot assess`.
+                return toCounters(await client.request('state-stats', {}, { autostart: false }))
+              } catch (e) {
+                // `E_NOT_ATTACHED` is the "nothing to look at" case the deps
+                // contract expresses as null. Anything else — a dead daemon, a
+                // protocol fault — must propagate, so it reads as `cannot
+                // assess` rather than being silently reported as "not
+                // attached", which is a different and more reassuring claim.
+                if (isAgentQaError(e) && e.code === 'E_NOT_ATTACHED') return null
+                throw e
+              }
+            },
+            keys: async () => {
+              const data = (await client.request('state-list', {}, { autostart: false })) as {
+                entries: { key: string }[]
+              }
+              return data.entries.map((e) => e.key)
+            },
+            stamp: () => {
+              try {
+                return JSON.parse(
+                  readFileSync(join(root, SKILL_DIR, '.agentqa-stamp'), 'utf8'),
+                ) as { cli: string; wire: string }
+              } catch {
+                return null
+              }
+            },
+            cliVersion: version,
+          })),
+        )
+      }
+
       emit(results, () => renderChecks(results), jsonMode(opts), out)
-      if (results.some((r) => !r.ok)) exitCode = 1
+      // `unknown` is deliberately not a failure: doctor is run in half-set-up
+      // environments, and exiting non-zero because a check could not look
+      // would make it useless there. It is loud in the output instead.
+      if (results.some((r) => r.status === 'fail')) exitCode = 1
     })
 
   try {
