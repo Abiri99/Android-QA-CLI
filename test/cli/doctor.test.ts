@@ -11,7 +11,7 @@ const healthy = {
 describe('runChecks', () => {
   it('passes every check in a healthy environment', async () => {
     const results = await runChecks(healthy)
-    expect(results.every((r) => r.ok)).toBe(true)
+    expect(results.every((r) => r.status === 'ok')).toBe(true)
   })
 
   it('reports each check by name', async () => {
@@ -28,14 +28,14 @@ describe('runChecks', () => {
       },
     })
     const adb = results.find((r) => r.name === 'adb')
-    expect(adb?.ok).toBe(false)
+    expect(adb?.status).toBe('fail')
     expect(adb?.detail).toContain('ENOENT')
   })
 
   it('fails the devices check when nothing is attached, and says what to do', async () => {
     const results = await runChecks({ ...healthy, devices: async () => [] })
     const devices = results.find((r) => r.name === 'devices')
-    expect(devices?.ok).toBe(false)
+    expect(devices?.status).toBe('fail')
     expect(devices?.detail).toMatch(/no device/i)
   })
 
@@ -45,13 +45,13 @@ describe('runChecks', () => {
       devices: async () => [{ serial: 'R5CT30ABCDE', state: 'unauthorized' }],
     })
     const devices = results.find((r) => r.name === 'devices')
-    expect(devices?.ok).toBe(false)
+    expect(devices?.status).toBe('fail')
     expect(devices?.detail).toMatch(/unauthorized/i)
   })
 
   it('fails the node check below the supported major version', async () => {
     const results = await runChecks({ ...healthy, nodeVersion: () => 'v20.11.0' })
-    expect(results.find((r) => r.name === 'node')?.ok).toBe(false)
+    expect(results.find((r) => r.name === 'node')?.status).toBe('fail')
   })
 
   it('does not let a failing adb check abort the remaining checks', async () => {
@@ -68,8 +68,8 @@ describe('runChecks', () => {
 describe('renderChecks', () => {
   it('marks passes and failures distinctly', () => {
     expect(renderChecks([
-      { name: 'node', ok: true, detail: 'v22.9.0' },
-      { name: 'adb', ok: false, detail: 'not found' },
+      { name: 'node', status: 'ok', detail: 'v22.9.0' },
+      { name: 'adb', status: 'fail', detail: 'not found' },
     ])).toBe('ok    node  v22.9.0\nFAIL  adb   not found')
   })
 })

@@ -164,14 +164,14 @@ describe('main: daemon argument wiring', () => {
   it('doctor emits an array of named checks without touching the daemon', async () => {
     const code = await main(['doctor', '--json'], out)
     expect([0, 1]).toContain(code)
-    const results = JSON.parse(lines[0]!) as { name: string; ok: boolean }[]
+    const results = JSON.parse(lines[0]!) as { name: string; status: string }[]
     expect(Array.isArray(results)).toBe(true)
     expect(results.length).toBeGreaterThan(0)
     for (const r of results) {
       expect(typeof r.name).toBe('string')
-      expect(typeof r.ok).toBe('boolean')
+      expect(['ok', 'fail', 'unknown']).toContain(r.status)
     }
-    expect(code).toBe(results.some((r) => !r.ok) ? 1 : 0)
+    expect(code).toBe(results.some((r) => r.status === 'fail') ? 1 : 0)
     expect(calls).toHaveLength(0)
   })
 
