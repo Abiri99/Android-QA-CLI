@@ -19,7 +19,7 @@ describe('init CLI', () => {
   const composeFile = () => join(root, 'app/src/main/kotlin/com/example/app/AgentQaCompose.kt')
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), 'agentqa-init-cli-'))
+    root = mkdtempSync(join(tmpdir(), 'agentqa-cli-init-'))
     roots.push(root)
     writeFileSync(join(root, 'agentqa.toml'), TOML)
     mkdirSync(join(root, 'app/src/main/kotlin'), { recursive: true })

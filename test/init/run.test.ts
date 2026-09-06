@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runInit } from '../../src/init/run.js'
@@ -166,6 +166,12 @@ variant = "debug"
     })
     // Snapshot temp directory entries before calling runInit, to verify no
     // temp files are created in this case.
+    //
+    // The prefix below is runInit's own (`agentqa-init-`), and it is shared
+    // with this file's `repo()` helper by design. No OTHER test file may
+    // create tmpdir entries under it: vitest runs files in parallel worker
+    // threads sharing one tmpdir, so a neighbouring `agentqa-init-cli-*`
+    // would land inside this filter and flake the run.
     const beforeEntries = new Set(
       readdirSync(tmpdir()).filter((name) => name.startsWith('agentqa-init-')),
     )
@@ -184,6 +190,36 @@ variant = "debug"
     expect(afterEntries).toEqual(beforeEntries)
     // The rest of init is still useful without it.
     expect(existsSync(join(noPackage, SKILL_DIR, 'SKILL.md'))).toBe(true)
+  })
+
+  // Root bypasses the permission bits this relies on, so the file would be
+  // readable and the case would not reproduce.
+  const asRoot = typeof process.getuid === 'function' && process.getuid() === 0
+  it.skipIf(asRoot)('does not truncate a CLAUDE.md it could not read', () => {
+    // Every read failure used to collapse to null, and null means "absent" to
+    // appendPointer — which returns the pointer line ALONE. Written over an
+    // existing CLAUDE.md in a repo that is not ours, that is a one-bullet
+    // truncation of somebody's file.
+    //
+    // Write-only mode is the case that actually bites: the read fails
+    // (EACCES) and the write then SUCCEEDS, so nothing stops the truncation.
+    const claude = join(root, 'CLAUDE.md')
+    const original = '# House rules\n\n- Always run the linter.\n'
+    writeFileSync(claude, original)
+    chmodSync(claude, 0o200)
+    try {
+      let threw: unknown = null
+      try {
+        run(root)
+      } catch (e) {
+        threw = e
+      }
+      expect(threw).not.toBeNull()
+      chmodSync(claude, 0o600)
+      expect(readFileSync(claude, 'utf8')).toBe(original)
+    } finally {
+      chmodSync(claude, 0o600)
+    }
   })
 
   it('throws E_NO_CONFIG when there is no agentqa.toml', () => {

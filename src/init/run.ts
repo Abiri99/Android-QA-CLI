@@ -28,11 +28,22 @@ export interface InitOptions {
   compose?: boolean
 }
 
+/**
+ * The file's contents, or null when it genuinely does not exist.
+ *
+ * Anything else — a permission error, a directory where a file was expected,
+ * EISDIR, EACCES — is rethrown rather than flattened to null. `null` flows
+ * into `appendPointer`, which returns the pointer line ALONE for an absent
+ * file; writing that over a `CLAUDE.md` that merely could not be read
+ * truncates a repository we do not own to a single bullet. Failing loudly is
+ * the only safe direction when the blast radius is someone else's repo.
+ */
 function readOrNull(path: string): string | null {
   try {
     return readFileSync(path, 'utf8')
-  } catch {
-    return null
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw e
   }
 }
 
