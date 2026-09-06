@@ -24,6 +24,109 @@ Then check the environment:
 agentqa doctor
 ```
 
+## Usage
+
+### Once per project
+
+Create `agentqa.toml` at the repo root:
+
+```toml
+[project]
+module  = "app"                  # the Gradle module
+variant = "debug"
+package = "com.example.shop"     # where AgentQa.kt goes
+
+[app]
+application_id = "com.example.shop.debug"   # note the suffix, if you have one
+```
+
+Then:
+
+```bash
+agentqa init
+```
+
+That writes the runtime helper, the coding-agent skill, and a pointer in `CLAUDE.md` and `AGENTS.md`. It changes no build file. Add the one line it can't add for you, at your app's entry point:
+
+```kotlin
+if (BuildConfig.DEBUG) AgentQa.enable()
+```
+
+Nothing reaches logcat until that runs, which is what keeps app state out of release builds.
+
+Now instrument the backbone — three calls, once, described in full in the skill `init` just wrote:
+
+```kotlin
+AgentQa.state("screen.current", destination.route)                  // at the nav host
+AgentQa.state("auth", mapOf("authenticated" to session.isValid))    // wherever session state lives
+```
+
+Build, install, and check it worked:
+
+```bash
+agentqa install app/build/outputs/apk/debug/app-debug.apk
+agentqa launch
+agentqa doctor --project .
+```
+
+`doctor`'s instrumentation section is the answer to "is this actually wired up". If it says `no wire records parsed`, either `enable()` isn't being called or the app hasn't emitted yet.
+
+### A QA session
+
+`launch` attaches state capture before starting the app, so you don't need a separate `state attach` — startup state is captured too.
+
+```bash
+agentqa clear                       # start from a known state; this logs the app out
+agentqa launch
+agentqa wait-for state screen.current=Home
+
+agentqa screen                      # see what's there
+agentqa tap tag=cart_btn
+agentqa wait-for state screen.current=Cart
+agentqa state get cart.itemCount    # verify what the app believes, not what it drew
+```
+
+Two habits worth forming:
+
+- **Prefer `wait-for state` over `wait-for screen`.** A state wait is woken by a line already arriving and costs nothing; a screen wait dumps the whole UI hierarchy every attempt, once or twice a second.
+- **Assert on state, not pixels.** `state get cart.itemCount` tells you what the app thinks. A screen that looks right over a wrong model is the bug you most want to catch.
+
+### When it stops for a human
+
+Any command that hits an auth gate fails **having done nothing**, so retrying after you log in is a first attempt, not a second:
+
+```json
+{
+  "error": "E_AUTH_REQUIRED",
+  "details": {
+    "gate": "login",
+    "gate_message": "Log in with a test account",
+    "resume": "agentqa auth wait --gate login --timeout 5m",
+    "human_action_required": true
+  }
+}
+```
+
+(Abridged — the full payload is under [How a blocked agent behaves](#how-a-blocked-agent-behaves).)
+
+A macOS notification fires at the same moment — once per pause, not once per retry. Relay the message, then run what `resume` says:
+
+```bash
+agentqa auth wait --gate login --timeout 5m --resume-to checkpoint
+```
+
+That blocks until the gate clears, then returns to where the flow paused if it arrived by deep link. Then retry the command that failed.
+
+### When something looks wrong
+
+```bash
+agentqa state stats     # is the stream alive, is it dropping lines, was the buffer grown
+agentqa doctor --project .
+agentqa crashes
+```
+
+`state stats` is the first stop for a flow that's behaving oddly. `gap=true` means logcat dropped lines and some values are marked stale; `buffer=NOT GROWN` means the device refused the bigger ring buffer, which makes drops more likely. Neither makes the tool lie — a value that can't be trusted reads `stale` — but both explain why you're getting `unknown` more than you expected.
+
 ## Architecture
 
 A thin client per invocation, talking over a Unix socket to one long-lived daemon per machine. The daemon holds what must outlive a single command: the logcat capture stream, the screen-snapshot references, per-project config, and per-device auth state. It starts on demand; `agentqa daemon start|stop` is there for when you need it explicitly.
