@@ -62,6 +62,11 @@ export interface ProjectConfig {
   activeBuildTypes: string[]
   applicationId?: string
   deeplinkScheme?: string
+  /**
+   * Kotlin package for the generated `AgentQa.kt`. The TOML key is `package`;
+   * renamed here because `package` reads as the npm sense in a TypeScript file.
+   */
+  packageName?: string
   strategy: AuthStrategy
   notify: boolean
   gates: GateConfig[]

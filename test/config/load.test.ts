@@ -200,4 +200,24 @@ message = "m"
       expect(e.message).toContain('ui_any')
     }
   })
+
+  it('reads project.package', () => {
+    const cfg = loadConfig(write(MINIMAL + '\npackage = "com.example.app"\n'))
+    expect(cfg.packageName).toBe('com.example.app')
+  })
+
+  it('leaves packageName undefined when the key is absent', () => {
+    expect(loadConfig(write(MINIMAL)).packageName).toBeUndefined()
+  })
+
+  it('rejects a non-string package, naming the field', () => {
+    try {
+      loadConfig(write(MINIMAL + '\npackage = 3\n'))
+      throw new Error('expected loadConfig to throw')
+    } catch (e) {
+      if (!isAgentQaError(e)) throw e
+      expect(e.code).toBe('E_CONFIG_INVALID')
+      expect(e.message).toContain('package')
+    }
+  })
 })
