@@ -4,7 +4,7 @@ A CLI that lets an AI coding agent drive and inspect an Android app — tap thro
 
 The agent is the user. Every command has a `--json` form, output is compact by default because the agent's context is finite, and errors carry stable machine-readable codes so an agent branches on the failure kind rather than parsing prose.
 
-**Status: phases 1–4 of [the design](docs/superpowers/specs/2026-09-04-android-agent-qa-cli-design.md) are built.** Device control, screen reads, actions, state capture and auth gates all work. Instrumentation setup (`init`), snapshot/restore, and run traces are not — see [What isn't built yet](#what-isnt-built-yet). Read that section before planning around this.
+**Status: phases 1–4 of [the design](docs/superpowers/specs/2026-09-04-android-agent-qa-cli-design.md) are built, plus project setup.** Device control, screen reads, actions, state capture, auth gates, and `agentqa init` (the runtime helper, the coding-agent skill, and `doctor` checks for both) all work. Snapshot/restore and run traces are not — see [What isn't built yet](#what-isnt-built-yet). Read that section before planning around this.
 
 ## Requirements
 
@@ -103,9 +103,39 @@ agentqa state stats      # counters, for diagnosing a quiet or lossy stream
 
 **Staleness is the point.** logcat drops lines silently under load, and a monotonic sequence number is the only evidence it happened. When a gap is detected, every value written before it reads `stale: true` — because it may have been superseded by a line nobody saw. Serving a stale value as if it were current is the worst thing this tool could do, so it doesn't: `state get` reports staleness, and `wait-for state` returns `E_STATE_STALE` rather than `E_TIMEOUT` when a key holds the expected value but cannot be trusted.
 
+## Setting up a project
+
+```bash
+agentqa init
+```
+
+Run from anywhere under a project with an `agentqa.toml` (see [Authentication gates](#authentication-gates) for that file). `init` writes five things and touches no build file:
+
+- `AgentQa.kt` — the runtime helper, placed under the module's Kotlin (or Java) source root at the package named by `project.package` in `agentqa.toml` (falling back to `app.application_id`, though that carries any `applicationIdSuffix` and often isn't a real package name). If it can't work out where your sources live or what package to use, it says why and writes the file to a temp path instead — it would rather hand you a copy to move than guess and place something that silently compiles to nothing.
+- `AgentQaCompose.kt` — a small extension exposing `AgentQa.semanticsModifier()`, written only when the module looks like it uses Compose (or forced with `--compose`/`--no-compose`).
+- `.claude/skills/agentqa-instrumentation/SKILL.md` — the coding-agent skill described below.
+- `.claude/skills/agentqa-instrumentation/.agentqa-stamp` — records the CLI and wire versions that wrote the skill, so `doctor` can tell you it's stale.
+- a pointer line appended to both `CLAUDE.md` and `AGENTS.md` at the project root (skipped, not duplicated, if one is already there), so an agent working in either tool sees it.
+
+The helper is **off by default** — nothing reaches logcat until it's enabled, which is what keeps it out of release builds without a Gradle source-set split. Turning it on is the one thing `init` can't do for you: add this at the app's entry point, guarded by `BuildConfig.DEBUG` so a release build never calls it:
+
+```kotlin
+if (BuildConfig.DEBUG) AgentQa.enable()
+```
+
+The `AgentQa` object has four methods: `enable()`, `isEnabled`, `state(key, value)` for a value that holds until overwritten, and `event(name, data)` for something that happened. `AgentQa.semanticsModifier()`, from the Compose file, makes Compose `testTag`s visible to `uiautomator`.
+
+The skill at `.claude/skills/agentqa-instrumentation/SKILL.md` is what makes instrumentation happen going forward rather than once: it tells a coding agent, triggered by the pointer in `CLAUDE.md`/`AGENTS.md`, to emit state whenever it adds or changes a screen, a ViewModel, navigation, or user-visible state — covering the reserved keys (`auth`, `screen.current`), why renaming a key is a breaking change for `agentqa.toml`'s gate conditions, primitives vs. objects, `state` vs. `event`, never emitting secrets, and why high-frequency emission degrades staleness detection for the whole app.
+
+```bash
+agentqa doctor --project /path/to/project
+```
+
+is how you check any of this actually worked: whether lines are arriving, whether the reserved keys are present, and whether the skill in this repo matches what the running CLI expects.
+
 ### The wire format
 
-`init` does not exist yet, so instrumentation is currently by hand. Emit lines under the logcat tag `AgentQA`:
+Instrumenting by hand — without `init`, or beyond what the generated helper covers — means emitting lines under the logcat tag `AgentQA` yourself:
 
 ```
 AGENTQA|v1|<seq>|<kind>|<key>|<chunk>/<total>|<json>
@@ -232,7 +262,7 @@ Every command supports `--json`; errors are `{ error, message, details? }` with 
 
 Documented so you don't plan around something that isn't there:
 
-- **`agentqa init` and `AgentQa.kt`.** No generated instrumentation helper, no Gradle variant mapping, no `applicationId` resolution via aapt2, no `probe add|list|strip`. Instrument by hand using [the wire format](#the-wire-format).
+- **`probe add|list|strip`.** Not built by this plan.
 - **`auth snapshot|restore`.** `auth.strategy = "snapshot"` parses but does nothing; every run pauses. The design gates this behind validating, against one real app, that a `run-as` data-dir snapshot survives restore with auth intact.
 - **Run traces.** No `run start|end`, no `report`.
 
@@ -247,6 +277,8 @@ The lifecycle commands were written without a device to try them on. Each one be
 | `cmd package resolve-activity -c android.intent.category.LAUNCHER --brief <pkg>` returns the launcher component | Run it; compare with what a home-screen tap opens |
 | `am start -W` failures print `Error:` at line start, or an exception | `agentqa launch --activity <pkg>/.SomeNonExportedActivity` |
 | `am force-stop` prints nothing when it works | `agentqa stop --package com.does.not.exist` should fail, not report success |
+
+The generated `AgentQa.kt` has never been compiled. Its content is pinned by tests and the wire lines it is designed to produce are asserted against the real reader, but nothing here proves it compiles against a real Android project, or that its chunking and sequence numbering behave under a real logcat. Chunking failures are silent, so a payload larger than ~3KB is the first thing worth checking on a device: emit one, then `agentqa state get <key>` and confirm the value came back whole. Two more limits worth knowing before you hit them on a device rather than here: the helper requires **Kotlin 1.5 or newer**, and chunking splits payload strings by UTF-16 char count, so it can land inside a surrogate pair — an emoji landing exactly on a chunk boundary comes back as U+FFFD instead of itself.
 
 ### Known limits of the adb driver
 
