@@ -2,14 +2,19 @@
   "name": "agentqa",
   "version": "0.1.0",
   "type": "module",
-  "bin": { "agentqa": "./dist/cli/bin.js" },
-  "engines": { "node": ">=22" },
+  "bin": {
+    "agentqa": "./dist/cli/bin.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "postbuild": "chmod +x dist/cli/bin.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.test.json"
+    "typecheck": "tsc -p tsconfig.test.json",
+    "bundle": "node scripts/bundle.mjs"
   },
   "dependencies": {
     "commander": "^12.1.0",
@@ -19,6 +24,7 @@
   "devDependencies": {
     "@types/node": "^22.9.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "vitest": "^2.1.0",
+    "esbuild": "^0.21.5"
   }
 }

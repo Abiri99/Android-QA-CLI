@@ -24,6 +24,34 @@ Then check the environment:
 agentqa doctor
 ```
 
+### If you cannot reach the npm registry
+
+Some managed machines can clone from GitHub but fail to download package
+tarballs — TLS inspection tends to show up as `ECONNRESET` part-way through an
+install, leaving empty package directories and no `tsc`. `--maxsockets=1` and
+retries do not help, because the fetch itself is what is being interrupted.
+
+For those machines, build a single self-contained file on any machine that
+*can* install, and copy that one file over:
+
+```bash
+npm install && npm run bundle      # writes bundle/agentqa.mjs
+```
+
+```bash
+cp bundle/agentqa.mjs ~/.local/bin/agentqa   # on the target machine
+chmod +x ~/.local/bin/agentqa
+agentqa doctor
+```
+
+It carries the CLI, the daemon, and every dependency, and needs nothing at run
+time but a Node that satisfies the engine range. It is the same program: it
+re-spawns *itself* with `--serve` where a normal build would run its sibling
+`dist/daemon/serve.js`.
+
+What it is not is a development install — there is no source, no test suite and
+no toolchain in it. Clone and `npm install` for that.
+
 ## Usage
 
 ### Once per project

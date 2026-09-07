@@ -20,11 +20,25 @@ const SHUTDOWN_TIMEOUT_MS = 3_000
 // that accepted the connection and then went silent.
 const REQUEST_TIMEOUT_MS = 60_000
 
+/** The daemon sibling of the built client, which is what a normal build has. */
+function defaultDaemonEntry(): string {
+  return fileURLToPath(new URL('../daemon/serve.js', import.meta.url))
+}
+
 export class DaemonClient {
   constructor(
     private readonly socketPath: string,
     private readonly version: string,
     private readonly requestTimeoutMs: number = REQUEST_TIMEOUT_MS,
+    /**
+     * The file to run as the daemon.
+     *
+     * Defaults to the sibling `daemon/serve.js`, which is what a normal build
+     * produces and what anyone cloning the repo gets. A single-file bundle has
+     * no such sibling, so it passes its own path and dispatches on `--serve`
+     * itself.
+     */
+    private readonly daemonEntry: string = defaultDaemonEntry(),
   ) {}
 
   // Two failures are recoverable by restarting the daemon, and both must be,
@@ -222,8 +236,10 @@ export class DaemonClient {
   }
 
   private async spawnDaemon(): Promise<void> {
-    const entry = fileURLToPath(new URL('../daemon/index.js', import.meta.url))
-    const child = spawn(process.execPath, [entry, '--serve', this.version], {
+    // `process.execPath`, not `node`: a managed machine may have several Node
+    // versions, and the daemon has to be the one the client is already running
+    // under or a mismatch surfaces as an unexplained daemon failure.
+    const child = spawn(process.execPath, [this.daemonEntry, '--serve', this.version], {
       detached: true,
       stdio: 'ignore',
     })
