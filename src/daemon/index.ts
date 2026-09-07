@@ -62,12 +62,3 @@ export async function startDaemon(version: string): Promise<DaemonServer> {
   await server.listen(daemonSocketPath())
   return server
 }
-
-// Entry point when spawned as a detached child by the client.
-if (process.argv[2] === '--serve') {
-  const version = process.argv[3] ?? '0.0.0'
-  startDaemon(version).catch((e) => {
-    console.error(e)
-    process.exit(1)
-  })
-}

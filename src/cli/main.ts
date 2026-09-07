@@ -21,8 +21,21 @@ import { findConfig } from '../config/load.js'
 import { runInit } from '../init/run.js'
 import type { GateReport } from '../daemon/auth-commands.js'
 
-const require = createRequire(import.meta.url)
-const { version } = require('../../package.json') as { version: string }
+/**
+ * The CLI's own version.
+ *
+ * A normal build reads it from the package manifest two directories up. The
+ * single-file bundle has no manifest beside it, so the bundler substitutes the
+ * version at build time and this returns before ever reaching the `require` —
+ * which would otherwise resolve against wherever the bundle happens to sit.
+ */
+function resolveVersion(): string {
+  const bundled = process.env.AGENTQA_BUNDLE_VERSION
+  if (bundled) return bundled
+  return (createRequire(import.meta.url)('../../package.json') as { version: string }).version
+}
+
+const version = resolveVersion()
 
 // commander.js throws a `CommanderError` under `exitOverride()` for both a
 // genuine successful `--help`/`--version` invocation AND for error-shaped
@@ -36,9 +49,15 @@ const { version } = require('../../package.json') as { version: string }
 export async function main(
   argv: string[],
   out: (s: string) => void = (s) => process.stdout.write(s + '\n'),
+  /**
+   * The file to run as the daemon. Omitted for a normal build, where the
+   * client finds its own sibling; the single-file bundle passes itself,
+   * because in that layout there is no sibling to find.
+   */
+  daemonEntry?: string,
 ): Promise<number> {
   const program = buildCli(version)
-  const client = new DaemonClient(daemonSocketPath(), version)
+  const client = new DaemonClient(daemonSocketPath(), version, undefined, daemonEntry)
   let exitCode = 0
 
   // `--json` is accepted both before and after the subcommand, because an
