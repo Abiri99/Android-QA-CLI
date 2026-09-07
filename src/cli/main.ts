@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { CommanderError } from 'commander'
 import { DaemonClient } from '../ipc/client.js'
 import { daemonSocketPath } from '../core/paths.js'
@@ -160,7 +160,12 @@ export async function main(
     .action(async (apkPath: string, opts: { device?: string; json?: boolean }) => {
       const data = (await client.request('install', {
         serial: opts.device,
-        apk: apkPath,
+        // Resolved here, against the caller's cwd. The daemon is a long-lived
+        // per-machine process whose cwd is wherever it was spawned, so a
+        // relative path sent verbatim resolves against the wrong directory —
+        // and reports "no apk at <path>" naming a path that does exist, from
+        // where the user was standing.
+        apk: resolve(apkPath),
       })) as { apk: string }
       emit(data, () => `installed ${data.apk}`, jsonMode(opts), out)
     })

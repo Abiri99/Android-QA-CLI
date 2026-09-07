@@ -320,3 +320,37 @@ describe('logs and crashes', () => {
     expect(res).toMatchObject({ ok: false, error: { error: 'E_BAD_ARGS' } })
   })
 })
+
+describe('wait timeouts accept the same durations auth wait does', () => {
+  // Found on a real device: `wait-for state x=y --timeout 10s` was rejected
+  // while `auth wait --timeout 10s` was accepted. One tool, two rules for the
+  // same flag, and the rejected one is the spelling a person reaches for.
+  it('accepts a suffixed duration on wait-for screen', async () => {
+    const { call } = build()
+    const res = await call('wait-for', { predicate: 'tag=checkout_btn', timeoutMs: '5s' })
+    expect(res.ok).toBe(true)
+  })
+
+  it('still accepts a bare number of milliseconds', async () => {
+    const { call } = build()
+    const res = await call('wait-for', { predicate: 'tag=checkout_btn', timeoutMs: 5000 })
+    expect(res.ok).toBe(true)
+  })
+
+  it('still rejects a value that is not a duration at all', async () => {
+    const { call } = build()
+    const res = (await call('wait-for', {
+      predicate: 'tag=checkout_btn',
+      timeoutMs: 'soon',
+    })) as { ok: boolean; error: { error: string; message: string } }
+    expect(res.ok).toBe(false)
+    expect(res.error.error).toBe('E_BAD_ARGS')
+    expect(res.error.message).toContain('soon')
+  })
+
+  it('still rejects zero, which would make a wait expire instantly', async () => {
+    const { call } = build()
+    const res = await call('wait-for', { predicate: 'tag=checkout_btn', timeoutMs: 0 })
+    expect(res.ok).toBe(false)
+  })
+})
