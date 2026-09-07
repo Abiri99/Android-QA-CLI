@@ -91,6 +91,38 @@ Two habits worth forming:
 - **Prefer `wait-for state` over `wait-for screen`.** A state wait is woken by a line already arriving and costs nothing; a screen wait dumps the whole UI hierarchy every attempt, once or twice a second.
 - **Assert on state, not pixels.** `state get cart.itemCount` tells you what the app thinks. A screen that looks right over a wrong model is the bug you most want to catch.
 
+### The fast path: read once, tap by ref
+
+`tap tag=…` looks up the tag by dumping the whole UI tree, every time. That dump is the single most expensive thing this tool does — on an `android-33` arm64 emulator it measured **11.7 seconds**, and occasionally far worse.
+
+`screen` records that dump as a numbered snapshot, and `#N` resolves against it without touching the device's UI layer at all. Measured back to back on the same screen:
+
+| | |
+|---|---|
+| `agentqa screen` — one dump | 11,737 ms |
+| `agentqa tap '#4'` — from the snapshot | **893 ms** |
+| `agentqa tap tag=go_to_cart` — fresh dump | 16,706 ms |
+
+So when you need several interactions on one screen, pay for the dump once:
+
+```bash
+agentqa screen                                  # #1 Text "Home" tag=screen_title
+                                                # #4 Button "Sign in" tag=sign_in
+agentqa tap '#4'
+agentqa wait-for state auth.authenticated=true  # free, and it confirms the tap worked
+
+agentqa screen                                  # re-read: the screen has changed
+agentqa tap '#3'
+```
+
+Quote the ref. Unquoted, both `zsh` and `bash` strip `#4` as a comment and you get `missing required argument 'target'`, which says nothing about what actually went wrong.
+
+**Why this isn't automatic.** A `#N` is only meaningful against the snapshot it came from, and the command you are about to run is usually the thing that invalidates it. Silently reusing a stale position would tap wherever a button *used to be*, report `ok`, and hit whatever has since moved there — a confident wrong action, which is the failure this whole tool is built to avoid. So every mutating command drops the snapshot, `tag=` always re-reads, and a ref you use after that fails with `E_STALE_REF` rather than tapping blind.
+
+`#N` is you taking that judgement explicitly: *I know this screen hasn't changed.* Use it for a run of interactions on one screen; go back to `tag=` whenever you are not sure.
+
+**Or avoid the UI layer entirely.** `wait-for state` never dumps, and `state get` never dumps. The cheapest QA is the kind that reads the app's own model — which is what the instrumentation is for.
+
 ### When it stops for a human
 
 Any command that hits an auth gate fails **having done nothing**, so retrying after you log in is a first attempt, not a second:
