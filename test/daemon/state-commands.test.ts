@@ -203,9 +203,34 @@ describe('wait-for-state', () => {
   })
 })
 
-describe('timeout validation', () => {
+describe('waits accept the durations auth wait accepts', () => {
   for (const [label, timeoutMs] of [
-    ['a unit suffix the CLI could not parse', '10s'],
+    ['seconds', '5s'],
+    ['minutes', '2m'],
+    ['explicit milliseconds', '500ms'],
+    ['a bare number', 5000],
+  ] as const) {
+    it(`takes ${label} on a state wait`, async () => {
+      const { call, emit, wire } = build()
+      await call('state-attach')
+      // Satisfied before the wait starts, so it returns immediately: what is
+      // under test is that the value parsed, not the waiting.
+      emit(wire(1, 'state', 'ready', 'true'))
+      const res = await call('wait-for-state', { predicate: 'ready=true', timeoutMs })
+      expect(res.ok).toBe(true)
+    })
+  }
+})
+
+describe('timeout validation', () => {
+  // `10s` used to belong here. It is now accepted, deliberately — `auth wait`
+  // always took suffixed durations and these did not, which is one tool with
+  // two rules for the same flag. Zero and negatives stay rejected: either
+  // makes a wait expire instantly, which an agent reads as "the condition is
+  // false" rather than "you gave me a nonsense timeout".
+  for (const [label, timeoutMs] of [
+    ['a value that is not a duration at all', 'soon'],
+    ['an unknown unit', '10d'],
     ['zero', 0],
     ['a negative', -5],
   ] as const) {

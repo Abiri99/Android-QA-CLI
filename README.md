@@ -388,6 +388,16 @@ The lifecycle commands were written without a device to try them on. Each one be
 
 The generated `AgentQa.kt` has never been compiled. Its content is pinned by tests and the wire lines it is designed to produce are asserted against the real reader, but nothing here proves it compiles against a real Android project, or that its chunking and sequence numbering behave under a real logcat. Chunking failures are silent, so a payload larger than ~3KB is the first thing worth checking on a device: emit one, then `agentqa state get <key>` and confirm the value came back whole. Two more limits worth knowing before you hit them on a device rather than here: the helper requires **Kotlin 1.5 or newer**, and chunking splits payload strings by UTF-16 char count, so it can land inside a surrogate pair — an emoji landing exactly on a chunk boundary comes back as U+FFFD instead of itself.
 
+### What a real emulator showed
+
+Validated against an `android-33` arm64 emulator on Apple Silicon with a Compose app. What held up: the generated `AgentQa.kt` and `AgentQaCompose.kt` compile, Compose `testTag`s reach `uiautomator` through `semanticsModifier()`, a 400-element payload chunked and reassembled whole, and `logcat -G 16M` was accepted.
+
+One thing did not, and it shapes how you should use this:
+
+**`uiautomator dump` is wildly variable.** On that emulator the same call took 6.9s once and 187s the next — and `adb`'s 30-second bound turns the slow ones into `E_ADB_FAILED`. So `tap tag=…`, `screen`, and `wait-for screen` are unreliable there, while everything state-based was instant and correct throughout.
+
+That is the design's own thesis arriving as a measurement rather than an argument: prefer `wait-for state` over `wait-for screen`, assert on state rather than pixels, and reach for `tap x,y` when the dump is fighting you. A physical device is generally much faster than an emulator here.
+
 ### Known limits of the adb driver
 
 - **Animation blindness.** `uiautomator dump` cannot snapshot an animating screen; it fails with `E_UI_NOT_IDLE`. Loading and shimmer states are therefore not directly verifiable.

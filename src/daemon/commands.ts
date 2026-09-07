@@ -12,6 +12,7 @@ import { growLogcatBuffer } from '../adb/logcat-buffer.js'
 import { KEY_CODES } from '../driver/types.js'
 import type { KeyName } from '../driver/types.js'
 import { AgentQaError } from '../core/errors.js'
+import { parseDuration } from '../core/duration.js'
 import { deeplinkIntentArgs, intentResolutionFailed } from '../adb/intents.js'
 import type { Capture, CaptureManager } from '../state/capture.js'
 import { parseStatePredicate, matchesState, resolveKey, readPath } from '../state/query.js'
@@ -109,17 +110,11 @@ function numberArg(args: Record<string, unknown>, name: string): number | undefi
  * turns `NaN` into `null`).
  */
 function timeoutArg(args: Record<string, unknown>, fallback: number): number {
-  const raw = args.timeoutMs
-  if (raw === undefined || raw === null) return fallback
-  const value = typeof raw === 'string' ? Number(raw.trim()) : raw
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    throw new AgentQaError(
-      'E_BAD_ARGS',
-      `--timeout must be a positive number of milliseconds, got: ${JSON.stringify(raw)}`,
-      { argument: 'timeoutMs', value: raw },
-    )
-  }
-  return value
+  // Shares `auth wait`'s parser rather than accepting bare milliseconds only.
+  // Found on a real device: `wait-for state x=y --timeout 10s` was rejected
+  // while `auth wait --timeout 10s` was accepted — one tool with two rules for
+  // the same flag, and the rejected spelling is the one a person reaches for.
+  return parseDuration(args.timeoutMs, fallback)
 }
 
 function stringOptArg(args: Record<string, unknown>, name: string): string | undefined {

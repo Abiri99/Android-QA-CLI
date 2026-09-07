@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import { main } from '../../src/cli/main.js'
 import { CommandRegistry, DaemonServer } from '../../src/daemon/server.js'
@@ -98,5 +98,25 @@ describe('lifecycle CLI', () => {
     await main(['stop', '--project', home, '--json'], out)
     const data = JSON.parse(lines[0]!) as { applicationId: string }
     expect(data.applicationId).toBe('com.example.app')
+  })
+
+  // Found on a real device: `agentqa install app/build/.../app-debug.apk` from
+  // the project root failed with "no apk at ...". The daemon is a long-lived
+  // per-machine process whose cwd is wherever it happened to be spawned, so a
+  // relative path sent verbatim is resolved against the wrong directory —
+  // and the error names a path that does exist, from where the user stood.
+  it('sends install an absolute path', async () => {
+    await main(['install', 'app/build/outputs/apk/debug/app-debug.apk'], out)
+    expect(received[0]!.apk).toBe(resolve('app/build/outputs/apk/debug/app-debug.apk'))
+  })
+
+  it('leaves an already-absolute path alone', async () => {
+    await main(['install', '/tmp/app-debug.apk'], out)
+    expect(received[0]!.apk).toBe('/tmp/app-debug.apk')
+  })
+
+  it('resolves a path that walks upward', async () => {
+    await main(['install', '../sibling/app.apk'], out)
+    expect(received[0]!.apk).toBe(resolve('../sibling/app.apk'))
   })
 })
